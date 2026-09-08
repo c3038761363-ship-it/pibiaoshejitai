@@ -7,8 +7,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
-  --font-mono: "SFMono-Regular", Consolas, monospace;
+  --font-sans: 'Microsoft YaHei', 'PingFang SC', Arial, sans-serif;
+  --font-mono: 'SFMono-Regular', Consolas, monospace;
   --font-heading: var(--font-sans);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
@@ -151,8 +151,41 @@
     @apply border-primary bg-primary text-primary-foreground shadow-[0_6px_18px_rgba(145,84,38,.18)];
   }
 
+  .template-grid {
+    @apply grid grid-cols-2 gap-2;
+  }
+
+  .template-card {
+    @apply flex min-h-16 flex-col items-start justify-between rounded-xl border bg-background px-3 py-2.5 text-left transition-all hover:border-primary/55 hover:bg-accent;
+  }
+
+  .template-card span {
+    @apply line-clamp-1 text-base font-semibold;
+  }
+
+  .template-card small {
+    @apply text-xs text-muted-foreground;
+  }
+
+  .font-preview {
+    @apply rounded-lg border border-dashed bg-background px-3 py-2 text-base;
+  }
+
+  .mode-choice {
+    @apply min-h-10 rounded-lg border bg-background px-2 py-2 text-xs font-medium leading-4 transition-colors hover:border-primary/55 hover:bg-accent;
+  }
+
+  .mode-choice-active {
+    @apply border-primary bg-primary text-primary-foreground;
+  }
+
+  .warning-note {
+    @apply flex gap-2 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-5 text-amber-900;
+  }
+
   .control-panel {
-    scrollbar-color: color-mix(in oklch, var(--primary) 35%, transparent) transparent;
+    scrollbar-color: color-mix(in oklch, var(--primary) 35%, transparent)
+      transparent;
     scrollbar-width: thin;
   }
 
@@ -174,18 +207,26 @@
 
   .preview-shell {
     background:
-      radial-gradient(circle at 50% 30%, rgba(255,255,255,.07), transparent 36%),
+      radial-gradient(
+        circle at 50% 30%,
+        rgba(255, 255, 255, 0.07),
+        transparent 36%
+      ),
       #20201f;
-    box-shadow: inset 0 0 0 1px rgba(255,255,255,.05);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
   }
 
   .preview-stage {
     @apply relative grid min-h-[480px] place-items-center overflow-hidden rounded-2xl border border-white/10 p-12 sm:min-h-[520px] sm:p-20;
     background-color: #181817;
     background-image:
-      linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+      linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
     background-size: 20px 20px;
+  }
+
+  .preview-warning {
+    @apply mt-3 flex items-center justify-center gap-2 rounded-xl border border-amber-300/20 bg-amber-300/10 px-4 py-3 text-sm text-amber-100;
   }
 
   .label-frame {
