@@ -20,6 +20,7 @@ export type TracedVector = {
 export type TracePreprocessOptions = {
   threshold: number;
   cleanup: number;
+  edgeCleanupPercent: number;
   invert: boolean;
 };
 
@@ -98,18 +99,20 @@ function removeSmallBlackAreas(
 
       const x = current % width;
       const y = Math.floor(current / width);
-      const neighbors = [
-        x > 0 ? current - 1 : -1,
-        x < width - 1 ? current + 1 : -1,
-        y > 0 ? current - width : -1,
-        y < height - 1 ? current + width : -1,
-      ];
-
-      for (const next of neighbors) {
-        if (next >= 0 && mask[next] === 1 && visited[next] === 0) {
-          visited[next] = 1;
-          queue[queueEnd] = next;
-          queueEnd += 1;
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          if (offsetX === 0 && offsetY === 0) continue;
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) {
+            continue;
+          }
+          const next = nextY * width + nextX;
+          if (mask[next] === 1 && visited[next] === 0) {
+            visited[next] = 1;
+            queue[queueEnd] = next;
+            queueEnd += 1;
+          }
         }
       }
     }
@@ -122,6 +125,143 @@ function removeSmallBlackAreas(
   }
 
   return mask;
+}
+
+function removeEdgeConnectedBlackAreas(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  edgeCleanupPercent: number,
+) {
+  const percentage = clamp(edgeCleanupPercent, 0, 20);
+  if (percentage === 0) return mask;
+
+  const marginX = Math.max(1, Math.round((width * percentage) / 100));
+  const marginY = Math.max(1, Math.round((height * percentage) / 100));
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  const component = new Int32Array(mask.length);
+
+  for (let start = 0; start < mask.length; start += 1) {
+    if (mask[start] === 0 || visited[start] === 1) continue;
+
+    let queueStart = 0;
+    let queueEnd = 1;
+    let componentSize = 0;
+    let edgePixelCount = 0;
+    let minimumX = width;
+    let minimumY = height;
+    let maximumX = -1;
+    let maximumY = -1;
+    queue[0] = start;
+    visited[start] = 1;
+
+    while (queueStart < queueEnd) {
+      const current = queue[queueStart];
+      queueStart += 1;
+      component[componentSize] = current;
+      componentSize += 1;
+
+      const x = current % width;
+      const y = Math.floor(current / width);
+      minimumX = Math.min(minimumX, x);
+      minimumY = Math.min(minimumY, y);
+      maximumX = Math.max(maximumX, x);
+      maximumY = Math.max(maximumY, y);
+      if (
+        x < marginX ||
+        x >= width - marginX ||
+        y < marginY ||
+        y >= height - marginY
+      ) {
+        edgePixelCount += 1;
+      }
+
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          if (offsetX === 0 && offsetY === 0) continue;
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (nextX < 0 || nextX >= width || nextY < 0 || nextY >= height) {
+            continue;
+          }
+          const next = nextY * width + nextX;
+          if (mask[next] === 1 && visited[next] === 0) {
+            visited[next] = 1;
+            queue[queueEnd] = next;
+            queueEnd += 1;
+          }
+        }
+      }
+    }
+
+    const mostlyInEdgeBand = edgePixelCount / componentSize >= 0.7;
+    const looksLikeSurroundingFrame =
+      edgePixelCount > 0 &&
+      (maximumX - minimumX + 1) / width >= 0.72 &&
+      (maximumY - minimumY + 1) / height >= 0.72;
+
+    if (mostlyInEdgeBand || looksLikeSurroundingFrame) {
+      for (let index = 0; index < componentSize; index += 1) {
+        mask[component[index]] = 0;
+      }
+    }
+  }
+
+  return mask;
+}
+
+function maskToTrimmedRaster(mask: Uint8Array, width: number, height: number) {
+  let minimumX = width;
+  let minimumY = height;
+  let maximumX = -1;
+  let maximumY = -1;
+
+  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+    if (mask[pixel] === 0) continue;
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    minimumX = Math.min(minimumX, x);
+    minimumY = Math.min(minimumY, y);
+    maximumX = Math.max(maximumX, x);
+    maximumY = Math.max(maximumY, y);
+  }
+
+  if (maximumX < minimumX || maximumY < minimumY) {
+    return {
+      width: 2,
+      height: 2,
+      data: new Uint8ClampedArray(2 * 2 * 4).fill(255),
+    };
+  }
+
+  const inkWidth = maximumX - minimumX + 1;
+  const inkHeight = maximumY - minimumY + 1;
+  const padding = Math.max(
+    2,
+    Math.round(Math.max(inkWidth, inkHeight) * 0.025),
+  );
+  const left = Math.max(0, minimumX - padding);
+  const top = Math.max(0, minimumY - padding);
+  const right = Math.min(width - 1, maximumX + padding);
+  const bottom = Math.min(height - 1, maximumY + padding);
+  const outputWidth = right - left + 1;
+  const outputHeight = bottom - top + 1;
+  const output = new Uint8ClampedArray(outputWidth * outputHeight * 4);
+
+  for (let y = 0; y < outputHeight; y += 1) {
+    for (let x = 0; x < outputWidth; x += 1) {
+      const sourcePixel = (top + y) * width + left + x;
+      const value = mask[sourcePixel] === 1 ? 0 : 255;
+      const outputIndex = (y * outputWidth + x) * 4;
+      output[outputIndex] = value;
+      output[outputIndex + 1] = value;
+      output[outputIndex + 2] = value;
+      output[outputIndex + 3] = 255;
+    }
+  }
+
+  return { width: outputWidth, height: outputHeight, data: output };
 }
 
 export function preprocessForTrace(
@@ -167,19 +307,17 @@ export function preprocessForTrace(
     mask[pixel] = selected ? 1 : 0;
   }
 
+  removeEdgeConnectedBlackAreas(
+    mask,
+    width,
+    height,
+    options.edgeCleanupPercent,
+  );
   removeSmallBlackAreas(mask, width, height, cleanup * cleanup * 2);
 
-  const output = new Uint8ClampedArray(width * height * 4);
-  for (let pixel = 0; pixel < mask.length; pixel += 1) {
-    const value = mask[pixel] === 1 ? 0 : 255;
-    const dataIndex = pixel * 4;
-    output[dataIndex] = value;
-    output[dataIndex + 1] = value;
-    output[dataIndex + 2] = value;
-    output[dataIndex + 3] = 255;
-  }
-
-  return { width, height, data: output };
+  // Trimming after removing the old label body makes the new vector scale from
+  // the artwork itself instead of from the customer's photographed leather.
+  return maskToTrimmedRaster(mask, width, height);
 }
 
 export function extractBlackVectorPaths(svg: string): string[] {

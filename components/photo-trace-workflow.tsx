@@ -163,7 +163,8 @@ export function PhotoTraceWorkflow({
     height: 0.9,
   });
   const [threshold, setThreshold] = useState(116);
-  const [cleanup, setCleanup] = useState(3);
+  const [cleanup, setCleanup] = useState(4);
+  const [edgeCleanupPercent, setEdgeCleanupPercent] = useState(12);
   const [invert, setInvert] = useState(false);
   const [targetWidthInput, setTargetWidthInput] = useState(
     formatInputMillimeters(currentWidth),
@@ -237,6 +238,7 @@ export function PhotoTraceWorkflow({
       const processed = preprocessForTrace(raw, {
         threshold,
         cleanup,
+        edgeCleanupPercent,
         invert,
       });
       processedRef.current = processed;
@@ -263,7 +265,7 @@ export function PhotoTraceWorkflow({
     }, 120);
 
     return () => window.clearTimeout(timer);
-  }, [cleanup, crop, invert, open, source, threshold]);
+  }, [cleanup, crop, edgeCleanupPercent, invert, open, source, threshold]);
 
   function handlePhotoUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -402,10 +404,12 @@ export function PhotoTraceWorkflow({
       return;
     }
     if (inkRatio < 0.001) {
-      setError('当前几乎没有识别到图案，请提高识别深浅或尝试反相。');
+      setError(
+        '当前没有留下可描绘的图文，请提高识别深浅，或降低“去边框范围”。',
+      );
       return;
     }
-    if (inkRatio > 0.72) {
+    if (inkRatio > 0.88) {
       setError('当前黑色区域过多，请降低识别深浅或重新框选。');
       return;
     }
@@ -425,9 +429,9 @@ export function PhotoTraceWorkflow({
         ],
         colorsampling: 0,
         colorquantcycles: 1,
-        pathomit: Math.max(0, cleanup * 2),
-        ltres: 1,
-        qtres: 1,
+        pathomit: Math.max(0, cleanup),
+        ltres: 0.55,
+        qtres: 0.55,
         rightangleenhance: true,
         linefilter: false,
         strokewidth: 0,
@@ -496,7 +500,7 @@ export function PhotoTraceWorkflow({
         <DialogHeader className="border-b px-5 py-4 pr-12">
           <DialogTitle className="text-lg">照片复刻 / 自动描绘</DialogTitle>
           <DialogDescription className="leading-6">
-            上传客户照片，框选要复刻的文字和图案，检查黑白效果后生成真实矢量曲线。
+            高质量剪贴画模式：自动去掉皮牌、旧边框、原缝线和皮纹，只把字母、文字与图案生成矢量曲线。
           </DialogDescription>
         </DialogHeader>
 
@@ -585,17 +589,25 @@ export function PhotoTraceWorkflow({
             )}
 
             <div className="rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
-              只框选需要复刻的图文，尽量避开木纹、白色尺寸标注和原照片缝线；本设计台会重新生成规定的上下3
-              mm虚线。
+              每次框选一块皮牌即可，不必只框得很紧。旧皮牌边框和原照片缝线会被自动排除；设计台会重新生成规定的上下3
+              mm黑色虚线。
             </div>
           </section>
 
           <section className="space-y-4">
             <div>
-              <p className="font-medium">2. 检查黑白识别</p>
+              <p className="font-medium">2. 检查保留下来的图文</p>
               <p className="text-sm text-muted-foreground">
-                黑色部分会被制成曲线；调整后需再次点击自动描绘。
+                预览已自动裁掉空白；只有黑色字母、文字、线条和图形会制成曲线。
               </p>
+            </div>
+            <div className="rounded-xl border border-emerald-600/25 bg-emerald-500/[0.07] p-3 text-sm leading-6 text-emerald-900">
+              <span className="font-medium">
+                高质量剪贴画（只保留图文）已开启
+              </span>
+              <span className="block">
+                主要位于外侧清理区的旧边框、缝线和杂点会整块删除，不会按“长线”误删中间的箭头或交叉线。
+              </span>
             </div>
             <div className="grid min-h-44 place-items-center overflow-hidden rounded-xl border bg-white p-2">
               {source ? (
@@ -622,7 +634,7 @@ export function PhotoTraceWorkflow({
             />
             <RangeField
               id="trace-cleanup"
-              label="去皮纹 / 去杂点"
+              label="图文净化 / 去皮纹"
               value={cleanup}
               unit="级"
               min={0}
@@ -630,6 +642,19 @@ export function PhotoTraceWorkflow({
               step={1}
               onChange={setCleanup}
             />
+            <RangeField
+              id="trace-edge-cleanup"
+              label="去边框范围"
+              value={edgeCleanupPercent}
+              unit="%"
+              min={0}
+              max={20}
+              step={1}
+              onChange={setEdgeCleanupPercent}
+            />
+            <p className="-mt-2 text-xs leading-5 text-muted-foreground">
+              默认12%适合整块皮牌；如果要保留的图案本身贴近框选边缘，请适当调低。
+            </p>
             <label className="flex cursor-pointer items-center justify-between gap-4 rounded-xl border bg-background px-3 py-2.5 text-sm">
               <span>
                 <span className="block font-medium">反相识别</span>
@@ -662,7 +687,7 @@ export function PhotoTraceWorkflow({
               ) : (
                 <WandSparkles aria-hidden="true" />
               )}
-              {busy ? '正在生成曲线…' : '自动描绘为矢量曲线'}
+              {busy ? '正在生成曲线…' : '高质量描绘为矢量曲线'}
             </Button>
 
             {vector && (
@@ -737,7 +762,7 @@ export function PhotoTraceWorkflow({
 
             {error && <p className="text-sm text-destructive">{error}</p>}
             <p className="rounded-xl bg-muted p-3 text-sm leading-6 text-muted-foreground">
-              照片只在当前浏览器中处理，不会进入导出的SVG/CDR。照片中的文字会成为曲线轮廓，不能再按字体编辑。
+              照片和皮牌纹理只在当前浏览器中用于识别，不会进入导出的SVG/CDR。照片中的文字会成为曲线轮廓，不能再按字体编辑。
             </p>
           </section>
         </div>
