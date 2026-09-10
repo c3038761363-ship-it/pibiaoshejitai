@@ -1,3 +1,5 @@
+import type { TracedVector } from '@/lib/photo-trace';
+
 export type MarkShape =
   | 'none'
   | 'circle'
@@ -38,7 +40,8 @@ export type LeatherLabelSvgConfig = LabelLayoutInput & {
   markShape: MarkShape;
   markText: string;
   asset?: {
-    dataUrl: string;
+    dataUrl?: string;
+    vector?: TracedVector;
     width: number;
     height: number;
     xPercent: number;
@@ -156,15 +159,67 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
     )}">${escapeXml(config.markText)}</text>
   </g>`;
 
-  const assetMarkup = config.asset
-    ? `<g id="客户图案"><image href="${escapeXml(config.asset.dataUrl)}" x="${formatMm(
-        (config.width * config.asset.xPercent) / 100 - config.asset.width / 2,
-      )}" y="${formatMm(
-        (config.height * config.asset.yPercent) / 100 - config.asset.height / 2,
-      )}" width="${formatMm(config.asset.width)}" height="${formatMm(
-        config.asset.height,
-      )}" preserveAspectRatio="xMidYMid meet" /></g>`
+  const assetX = config.asset
+    ? (config.width * config.asset.xPercent) / 100 - config.asset.width / 2
+    : 0;
+  const assetY = config.asset
+    ? (config.height * config.asset.yPercent) / 100 - config.asset.height / 2
+    : 0;
+  const assetMarkup = config.asset?.vector
+    ? `<g id="客户自动描绘矢量" transform="translate(${formatMm(
+        assetX,
+      )} ${formatMm(assetY)}) scale(${formatMm(
+        config.asset.width / config.asset.vector.viewBoxWidth,
+      )} ${formatMm(
+        config.asset.height / config.asset.vector.viewBoxHeight,
+      )})" fill="${escapeXml(
+        config.stampColor,
+      )}" fill-rule="evenodd" stroke="none">
+    ${config.asset.vector.paths
+      .map((path) => `<path d="${escapeXml(path)}" />`)
+      .join('\n    ')}
+  </g>`
+    : config.asset?.dataUrl
+      ? `<g id="客户图案"><image href="${escapeXml(
+          config.asset.dataUrl,
+        )}" x="${formatMm(assetX)}" y="${formatMm(
+          assetY,
+        )}" width="${formatMm(config.asset.width)}" height="${formatMm(
+          config.asset.height,
+        )}" preserveAspectRatio="xMidYMid meet" /></g>`
+      : '';
+
+  const mainTextMarkup = config.mainText
+    ? `<text x="${formatMm(layout.textX)}" y="${formatMm(
+        layout.textY,
+      )}" font-family="${escapeXml(
+        config.mainFontFamily,
+      )}" font-size="${formatMm(
+        config.fontSize,
+      )}" font-weight="700" letter-spacing="${formatMm(
+        config.letterSpacing,
+      )}" dominant-baseline="middle">${escapeXml(config.mainText)}</text>`
     : '';
+  const subTextMarkup = config.subText
+    ? `<text x="${formatMm(layout.textX)}" y="${formatMm(
+        layout.textY + config.fontSize * 0.72,
+      )}" font-family="${escapeXml(
+        config.subFontFamily,
+      )}" font-size="${formatMm(
+        Math.max(2.5, config.fontSize * 0.34),
+      )}" letter-spacing="0.45" dominant-baseline="middle">${escapeXml(
+        config.subText,
+      )}</text>`
+    : '';
+  const textMarkup =
+    mainTextMarkup || subTextMarkup
+      ? `<g id="烫压文字" fill="${escapeXml(
+          config.stampColor,
+        )}" text-anchor="middle">
+    ${mainTextMarkup}
+    ${subTextMarkup}
+  </g>`
+      : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}">
@@ -191,21 +246,6 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
   </g>
   ${assetMarkup}
   ${markMarkup}
-  <g id="烫压文字" fill="${escapeXml(config.stampColor)}" text-anchor="middle">
-    <text x="${formatMm(layout.textX)}" y="${formatMm(
-      layout.textY,
-    )}" font-family="${escapeXml(config.mainFontFamily)}" font-size="${formatMm(
-      config.fontSize,
-    )}" font-weight="700" letter-spacing="${formatMm(
-      config.letterSpacing,
-    )}" dominant-baseline="middle">${escapeXml(config.mainText)}</text>
-    <text x="${formatMm(layout.textX)}" y="${formatMm(
-      layout.textY + config.fontSize * 0.72,
-    )}" font-family="${escapeXml(config.subFontFamily)}" font-size="${formatMm(
-      Math.max(2.5, config.fontSize * 0.34),
-    )}" letter-spacing="0.45" dominant-baseline="middle">${escapeXml(
-      config.subText,
-    )}</text>
-  </g>
+  ${textMarkup}
 </svg>`;
 }

@@ -23,6 +23,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+  PhotoTraceWorkflow,
+  type PhotoTraceApplyResult,
+} from '@/components/photo-trace-workflow';
+import {
   CheckRow,
   ColorPicker,
   DimensionInput,
@@ -57,9 +61,12 @@ import {
   type MarkLayout,
   type MarkShape,
 } from '@/lib/leather-label-svg';
+import type { TracedVector } from '@/lib/photo-trace';
 
 type UploadedAsset = {
-  dataUrl: string;
+  kind: 'bitmap' | 'svg' | 'traced-vector';
+  dataUrl?: string;
+  vector?: TracedVector;
   name: string;
   mime: string;
   aspectRatio: number;
@@ -198,7 +205,12 @@ export default function Home() {
   const assetHeight = asset
     ? Math.max(3, effectiveAssetWidth / Math.max(0.2, asset.aspectRatio))
     : 0;
-  const assetKind = asset?.mime === 'image/svg+xml' ? 'SVG图案' : '位图';
+  const assetKind =
+    asset?.kind === 'traced-vector'
+      ? '自动描绘矢量曲线'
+      : asset?.kind === 'svg'
+        ? 'SVG图案'
+        : '位图';
   const layout = getLabelLayout({
     width: size.width,
     height: size.height,
@@ -394,17 +406,26 @@ export default function Home() {
   }, [applyConfiguration]);
 
   const contentWarning = useMemo(() => {
-    const tops = [layout.textY - fontSize * 0.62];
-    const bottoms = [layout.textY + fontSize * 1.08];
+    const tops: number[] = [];
+    const bottoms: number[] = [];
+    const lefts: number[] = [];
+    const rights: number[] = [];
     const subFontSize = Math.max(2.5, fontSize * 0.34);
-    const mainWidth = estimateTextWidth(
-      mainText || '主文字',
-      fontSize,
-      letterSpacing,
-    );
-    const subWidth = estimateTextWidth(subText, subFontSize, 0.45);
-    const lefts = [layout.textX - mainWidth / 2, layout.textX - subWidth / 2];
-    const rights = [layout.textX + mainWidth / 2, layout.textX + subWidth / 2];
+    if (mainText) {
+      const mainWidth = estimateTextWidth(mainText, fontSize, letterSpacing);
+      tops.push(layout.textY - fontSize * 0.62);
+      bottoms.push(layout.textY + fontSize * 0.45);
+      lefts.push(layout.textX - mainWidth / 2);
+      rights.push(layout.textX + mainWidth / 2);
+    }
+    if (subText) {
+      const subY = layout.textY + fontSize * 0.72;
+      const subWidth = estimateTextWidth(subText, subFontSize, 0.45);
+      tops.push(subY - subFontSize * 0.62);
+      bottoms.push(subY + subFontSize * 0.45);
+      lefts.push(layout.textX - subWidth / 2);
+      rights.push(layout.textX + subWidth / 2);
+    }
     if (markShape !== 'none') {
       tops.push(layout.markY - effectiveMarkSize / 2);
       bottoms.push(layout.markY + effectiveMarkSize / 2);
@@ -419,6 +440,7 @@ export default function Home() {
       lefts.push(x - effectiveAssetWidth / 2);
       rights.push(x + effectiveAssetWidth / 2);
     }
+    if (tops.length === 0) return false;
     return (
       Math.min(...tops) < 4 ||
       Math.max(...bottoms) > size.height - 4 ||
@@ -475,6 +497,7 @@ export default function Home() {
         asset: asset
           ? {
               dataUrl: asset.dataUrl,
+              vector: asset.vector,
               width: effectiveAssetWidth,
               height: assetHeight,
               xPercent: assetXPercent,
@@ -532,6 +555,41 @@ export default function Home() {
     if (result.value) setLastValidCustomSize(result.value);
   }
 
+  function handlePhotoTraceApply(result: PhotoTraceApplyResult) {
+    const targetWidth = Number(result.targetWidth.toFixed(1));
+    const targetHeight = Number(result.targetHeight.toFixed(1));
+    const vectorRatio =
+      result.vector.viewBoxWidth / Math.max(1, result.vector.viewBoxHeight);
+    const safeWidth = Math.max(3, targetWidth - 8);
+    const safeHeight = Math.max(3, targetHeight - 10);
+    const fittedWidth = Math.max(
+      3,
+      Math.min(safeWidth, safeHeight * vectorRatio),
+    );
+
+    setCustomWidthInput(targetWidth.toFixed(1));
+    setCustomHeightInput(targetHeight.toFixed(1));
+    setLastValidCustomSize({ width: targetWidth, height: targetHeight });
+    setSizeMode('custom');
+    setAsset({
+      kind: 'traced-vector',
+      name: result.name,
+      mime: 'image/svg+xml',
+      aspectRatio: vectorRatio,
+      vector: result.vector,
+    });
+    setAssetWidth(Number(fittedWidth.toFixed(1)));
+    setAssetXPercent(50);
+    setAssetYPercent(50);
+    setFileName(result.name);
+    setUploadError('');
+    if (result.replaceCurrentDesign) {
+      setMainText('');
+      setSubText('');
+      setMarkShape('none');
+    }
+  }
+
   function handleAssetUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     setUploadError('');
@@ -553,6 +611,7 @@ export default function Home() {
       const image = new Image();
       image.onload = () =>
         setAsset({
+          kind: file.type === 'image/svg+xml' ? 'svg' : 'bitmap',
           dataUrl,
           name: file.name,
           mime: file.type,
@@ -562,7 +621,13 @@ export default function Home() {
               : 2,
         });
       image.onerror = () =>
-        setAsset({ dataUrl, name: file.name, mime: file.type, aspectRatio: 2 });
+        setAsset({
+          kind: file.type === 'image/svg+xml' ? 'svg' : 'bitmap',
+          dataUrl,
+          name: file.name,
+          mime: file.type,
+          aspectRatio: 2,
+        });
       image.src = dataUrl;
     };
     reader.onerror = () => setUploadError('图片读取失败，请重新选择。');
@@ -825,7 +890,27 @@ export default function Home() {
                   strokeWidth="0.45"
                   strokeDasharray={`${dashLength} ${dashGap}`}
                 />
-                {asset && (
+                {asset?.kind === 'traced-vector' && asset.vector && (
+                  <svg
+                    x={
+                      (size.width * assetXPercent) / 100 -
+                      effectiveAssetWidth / 2
+                    }
+                    y={(size.height * assetYPercent) / 100 - assetHeight / 2}
+                    width={effectiveAssetWidth}
+                    height={assetHeight}
+                    viewBox={`0 0 ${asset.vector.viewBoxWidth} ${asset.vector.viewBoxHeight}`}
+                    preserveAspectRatio="xMidYMid meet"
+                    overflow="visible"
+                  >
+                    <g fill={stampColor} fillRule="evenodd" stroke="none">
+                      {asset.vector.paths.map((path, index) => (
+                        <path key={`${path.slice(0, 24)}-${index}`} d={path} />
+                      ))}
+                    </g>
+                  </svg>
+                )}
+                {asset?.kind !== 'traced-vector' && asset?.dataUrl && (
                   <image
                     href={asset.dataUrl}
                     x={
@@ -849,31 +934,35 @@ export default function Home() {
                     fontFamily={mainFontOption.stack}
                   />
                 )}
-                <text
-                  x={layout.textX}
-                  y={layout.textY}
-                  fill={stampColor}
-                  fontFamily={mainFontOption.stack}
-                  fontSize={fontSize}
-                  fontWeight="700"
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  letterSpacing={letterSpacing}
-                >
-                  {mainText || '主文字'}
-                </text>
-                <text
-                  x={layout.textX}
-                  y={layout.textY + fontSize * 0.72}
-                  fill={stampColor}
-                  fontFamily={subFontOption.stack}
-                  fontSize={Math.max(2.5, fontSize * 0.34)}
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                  letterSpacing="0.45"
-                >
-                  {subText}
-                </text>
+                {mainText && (
+                  <text
+                    x={layout.textX}
+                    y={layout.textY}
+                    fill={stampColor}
+                    fontFamily={mainFontOption.stack}
+                    fontSize={fontSize}
+                    fontWeight="700"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    letterSpacing={letterSpacing}
+                  >
+                    {mainText}
+                  </text>
+                )}
+                {subText && (
+                  <text
+                    x={layout.textX}
+                    y={layout.textY + fontSize * 0.72}
+                    fill={stampColor}
+                    fontFamily={subFontOption.stack}
+                    fontSize={Math.max(2.5, fontSize * 0.34)}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    letterSpacing="0.45"
+                  >
+                    {subText}
+                  </text>
+                )}
               </svg>
             </div>
             <div className="dimension-line dimension-width">
@@ -1004,7 +1093,23 @@ export default function Home() {
             </div>
 
             <Divider />
-            <PanelHeading number="06" title="客户图案" compact />
+            <PanelHeading number="06" title="照片复刻" compact />
+            <div className="space-y-3 rounded-xl border border-primary/25 bg-primary/[0.055] p-4">
+              <div>
+                <p className="font-medium">客户只提供照片时</p>
+                <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                  上传整张照片，框选其中一款图文，去除皮纹和阴影后自动描成矢量曲线，并按输入的成品毫米尺寸放入画布。
+                </p>
+              </div>
+              <PhotoTraceWorkflow
+                currentWidth={size.width}
+                currentHeight={size.height}
+                onApply={handlePhotoTraceApply}
+              />
+            </div>
+
+            <Divider />
+            <PanelHeading number="07" title="已有客户图案" compact />
             <div className="space-y-2">
               <Label htmlFor="asset-upload">客户Logo或图案</Label>
               <label className="upload-zone" htmlFor="asset-upload">
@@ -1083,7 +1188,7 @@ export default function Home() {
             )}
 
             <Divider />
-            <PanelHeading number="07" title="黑色虚线" compact />
+            <PanelHeading number="08" title="黑色虚线" compact />
             <RangeField
               id="dash-length"
               label="虚线每段长度"
@@ -1116,7 +1221,7 @@ export default function Home() {
             />
 
             <Divider />
-            <PanelHeading number="08" title="保存CDR" compact />
+            <PanelHeading number="09" title="保存CDR" compact />
             <div className="rounded-xl border border-primary/20 bg-primary/[0.06] p-4">
               <div className="flex gap-3">
                 <Info
@@ -1163,9 +1268,11 @@ export default function Home() {
               <CheckRow text="未生成生产工艺单" />
               <CheckRow
                 text={
-                  asset && asset.mime !== 'image/svg+xml'
-                    ? '位图已嵌入；若只作描图参考，请在最终CDR删除'
-                    : '产出以矢量内容为主'
+                  asset?.kind === 'traced-vector'
+                    ? '客户照片未嵌入；自动描绘结果为矢量曲线'
+                    : asset?.kind === 'bitmap'
+                      ? '位图已嵌入；若只作描图参考，请在最终CDR删除'
+                      : '产出以矢量内容为主'
                 }
               />
             </div>
