@@ -18,10 +18,9 @@ export type TracedVector = {
 };
 
 export type TracePreprocessOptions = {
-  threshold: number;
+  detailSensitivity: number;
   cleanup: number;
   edgeCleanupPercent: number;
-  invert: boolean;
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -68,6 +67,250 @@ function boxBlur(
   }
 
   return result;
+}
+
+function extremaFilter2D(
+  source: Float32Array,
+  width: number,
+  height: number,
+  radius: number,
+  maximum: boolean,
+) {
+  if (radius <= 0) return new Float32Array(source);
+
+  const horizontal = new Float32Array(source.length);
+  const result = new Float32Array(source.length);
+  const windowSize = radius * 2 + 1;
+  const queueCapacity = Math.max(width, height) + radius * 2;
+  const queueIndices = new Int32Array(queueCapacity);
+  const queueValues = new Float32Array(queueCapacity);
+
+  function filterLine(
+    input: Float32Array,
+    output: Float32Array,
+    start: number,
+    stride: number,
+    length: number,
+  ) {
+    let queueStart = 0;
+    let queueEnd = 0;
+    const virtualLength = length + radius * 2;
+
+    for (let position = 0; position < virtualLength; position += 1) {
+      const sourcePosition = clamp(position - radius, 0, length - 1);
+      const value = input[start + sourcePosition * stride];
+      while (
+        queueEnd > queueStart &&
+        (maximum
+          ? value >= queueValues[queueEnd - 1]
+          : value <= queueValues[queueEnd - 1])
+      ) {
+        queueEnd -= 1;
+      }
+      queueIndices[queueEnd] = position;
+      queueValues[queueEnd] = value;
+      queueEnd += 1;
+
+      const firstVisiblePosition = position - (windowSize - 1);
+      while (
+        queueEnd > queueStart &&
+        queueIndices[queueStart] < firstVisiblePosition
+      ) {
+        queueStart += 1;
+      }
+
+      if (position >= windowSize - 1) {
+        const outputPosition = position - (windowSize - 1);
+        output[start + outputPosition * stride] = queueValues[queueStart];
+      }
+    }
+  }
+
+  for (let y = 0; y < height; y += 1) {
+    filterLine(source, horizontal, y * width, 1, width);
+  }
+  for (let x = 0; x < width; x += 1) {
+    filterLine(horizontal, result, x, width, height);
+  }
+
+  return result;
+}
+
+function structuralResponse(upper: Float32Array, lower: Float32Array) {
+  const response = new Uint8Array(upper.length);
+  for (let pixel = 0; pixel < response.length; pixel += 1) {
+    response[pixel] = clamp(
+      Math.round(Math.max(0, upper[pixel] - lower[pixel])),
+      0,
+      255,
+    );
+  }
+  return response;
+}
+
+function analysisBounds(
+  width: number,
+  height: number,
+  edgeCleanupPercent: number,
+) {
+  const percentage = clamp(edgeCleanupPercent, 0, 20);
+  const marginX = Math.min(
+    Math.floor((width - 1) / 2),
+    Math.max(0, Math.round((width * percentage) / 100)),
+  );
+  const marginY = Math.min(
+    Math.floor((height - 1) / 2),
+    Math.max(0, Math.round((height * percentage) / 100)),
+  );
+  return {
+    left: marginX,
+    top: marginY,
+    right: width - marginX,
+    bottom: height - marginY,
+  };
+}
+
+function otsuThreshold(
+  response: Uint8Array,
+  width: number,
+  bounds: ReturnType<typeof analysisBounds>,
+) {
+  const histogram = new Uint32Array(256);
+  let total = 0;
+  let totalSum = 0;
+
+  for (let y = bounds.top; y < bounds.bottom; y += 1) {
+    for (let x = bounds.left; x < bounds.right; x += 1) {
+      const value = response[y * width + x];
+      histogram[value] += 1;
+      total += 1;
+      totalSum += value;
+    }
+  }
+
+  let backgroundCount = 0;
+  let backgroundSum = 0;
+  let bestThreshold = 0;
+  let bestVariance = -1;
+
+  for (let value = 0; value < histogram.length; value += 1) {
+    backgroundCount += histogram[value];
+    backgroundSum += value * histogram[value];
+    const foregroundCount = total - backgroundCount;
+    if (backgroundCount === 0) continue;
+    if (foregroundCount === 0) break;
+
+    const backgroundMean = backgroundSum / backgroundCount;
+    const foregroundMean = (totalSum - backgroundSum) / foregroundCount;
+    const difference = backgroundMean - foregroundMean;
+    const variance =
+      backgroundCount * foregroundCount * difference * difference;
+    if (variance > bestVariance) {
+      bestVariance = variance;
+      bestThreshold = value;
+    }
+  }
+
+  return bestThreshold;
+}
+
+function responseCandidate(
+  response: Uint8Array,
+  width: number,
+  height: number,
+  bounds: ReturnType<typeof analysisBounds>,
+  detailSensitivity: number,
+) {
+  const sensitivity = clamp(detailSensitivity, 0, 100);
+  const threshold = clamp(
+    Math.round(
+      otsuThreshold(response, width, bounds) + 4 + (50 - sensitivity) * 0.12,
+    ),
+    4,
+    180,
+  );
+  const mask = new Uint8Array(response.length);
+  let selectedInside = 0;
+  const totalInside = Math.max(
+    1,
+    (bounds.right - bounds.left) * (bounds.bottom - bounds.top),
+  );
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const pixel = y * width + x;
+      if (response[pixel] < threshold) continue;
+      mask[pixel] = 1;
+      if (
+        x >= bounds.left &&
+        x < bounds.right &&
+        y >= bounds.top &&
+        y < bounds.bottom
+      ) {
+        selectedInside += 1;
+      }
+    }
+  }
+
+  return { mask, fraction: selectedInside / totalInside };
+}
+
+function chooseStructuralMask(
+  dark: ReturnType<typeof responseCandidate>,
+  light: ReturnType<typeof responseCandidate>,
+) {
+  const isUseful = (fraction: number) => fraction >= 0.01 && fraction <= 0.42;
+  const darkIsUseful = isUseful(dark.fraction);
+  const lightIsUseful = isUseful(light.fraction);
+
+  if (darkIsUseful && !lightIsUseful) return dark.mask;
+  if (lightIsUseful && !darkIsUseful) return light.mask;
+  return dark.fraction <= light.fraction ? dark.mask : light.mask;
+}
+
+function closeSinglePixelGaps(mask: Uint8Array, width: number, height: number) {
+  const dilated = new Uint8Array(mask.length);
+  const closed = new Uint8Array(mask.length);
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      let selected = false;
+      for (let offsetY = -1; offsetY <= 1 && !selected; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          const nextX = x + offsetX;
+          const nextY = y + offsetY;
+          if (
+            nextX >= 0 &&
+            nextX < width &&
+            nextY >= 0 &&
+            nextY < height &&
+            mask[nextY * width + nextX] === 1
+          ) {
+            selected = true;
+            break;
+          }
+        }
+      }
+      dilated[y * width + x] = selected ? 1 : 0;
+    }
+  }
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      let selected = true;
+      for (let offsetY = -1; offsetY <= 1 && selected; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          if (dilated[(y + offsetY) * width + x + offsetX] === 0) {
+            selected = false;
+            break;
+          }
+        }
+      }
+      closed[y * width + x] = selected ? 1 : 0;
+    }
+  }
+
+  return closed;
 }
 
 function removeSmallBlackAreas(
@@ -270,7 +513,6 @@ export function preprocessForTrace(
 ): RasterData {
   const { width, height } = source;
   const gray = new Float32Array(width * height);
-  let grayTotal = 0;
 
   for (let pixel = 0; pixel < gray.length; pixel += 1) {
     const dataIndex = pixel * 4;
@@ -279,33 +521,75 @@ export function preprocessForTrace(
       source.data[dataIndex + 1] * 0.587 +
       source.data[dataIndex + 2] * 0.114;
     gray[pixel] = value;
-    grayTotal += value;
   }
 
   const cleanup = clamp(Math.round(options.cleanup), 0, 10);
-  const fineBlurRadius = Math.floor(cleanup / 2);
+  const fineBlurRadius = Math.floor(cleanup / 5) + 1;
   const smoothed = boxBlur(gray, width, height, fineBlurRadius);
-  const backgroundRadius = Math.max(
-    8,
-    Math.min(42, Math.round(Math.min(width, height) * 0.045)),
+  const minimumDimension = Math.min(width, height);
+  const largestOddKernel = Math.max(
+    1,
+    Math.min(
+      111,
+      minimumDimension % 2 === 0 ? minimumDimension - 1 : minimumDimension,
+    ),
   );
-  const localBackground = boxBlur(smoothed, width, height, backgroundRadius);
-  const globalMean = grayTotal / Math.max(1, gray.length);
-  const mask = new Uint8Array(width * height);
-  const threshold = clamp(options.threshold, 70, 180);
+  let kernelSize = clamp(Math.round(minimumDimension * 0.35), 31, 111);
+  if (kernelSize % 2 === 0) kernelSize += 1;
+  kernelSize = Math.min(kernelSize, largestOddKernel);
+  const morphologyRadius = Math.floor(kernelSize / 2);
 
-  for (let pixel = 0; pixel < mask.length; pixel += 1) {
-    // A local background estimate removes slow leather shading while retaining
-    // embossed/engraved edges. A small global term keeps broad dark lettering.
-    const normalized =
-      128 +
-      (smoothed[pixel] - localBackground[pixel]) * 2.05 +
-      (smoothed[pixel] - globalMean) * 0.16;
-    const selected = options.invert
-      ? normalized > 256 - threshold
-      : normalized < threshold;
-    mask[pixel] = selected ? 1 : 0;
-  }
+  // A large closing estimates the leather surface above dark artwork; a large
+  // opening estimates it below light artwork. Comparing both directions makes
+  // the result independent of whether the photographed press mark is dark or
+  // light, while retaining filled letterforms for stamping instead of turning
+  // every stroke into a pair of hollow edge lines.
+  const expanded = extremaFilter2D(
+    smoothed,
+    width,
+    height,
+    morphologyRadius,
+    true,
+  );
+  const closing = extremaFilter2D(
+    expanded,
+    width,
+    height,
+    morphologyRadius,
+    false,
+  );
+  const contracted = extremaFilter2D(
+    smoothed,
+    width,
+    height,
+    morphologyRadius,
+    false,
+  );
+  const opening = extremaFilter2D(
+    contracted,
+    width,
+    height,
+    morphologyRadius,
+    true,
+  );
+  const darkResponse = structuralResponse(closing, smoothed);
+  const lightResponse = structuralResponse(smoothed, opening);
+  const bounds = analysisBounds(width, height, options.edgeCleanupPercent);
+  const darkCandidate = responseCandidate(
+    darkResponse,
+    width,
+    height,
+    bounds,
+    options.detailSensitivity,
+  );
+  const lightCandidate = responseCandidate(
+    lightResponse,
+    width,
+    height,
+    bounds,
+    options.detailSensitivity,
+  );
+  let mask = chooseStructuralMask(darkCandidate, lightCandidate);
 
   removeEdgeConnectedBlackAreas(
     mask,
@@ -313,7 +597,13 @@ export function preprocessForTrace(
     height,
     options.edgeCleanupPercent,
   );
-  removeSmallBlackAreas(mask, width, height, cleanup * cleanup * 2);
+  mask = closeSinglePixelGaps(mask, width, height);
+  removeSmallBlackAreas(
+    mask,
+    width,
+    height,
+    cleanup === 0 ? 1 : Math.max(2, Math.round((cleanup * cleanup) / 2)),
+  );
 
   // Trimming after removing the old label body makes the new vector scale from
   // the artwork itself instead of from the customer's photographed leather.
