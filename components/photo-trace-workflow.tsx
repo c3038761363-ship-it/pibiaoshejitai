@@ -453,7 +453,9 @@ export function PhotoTraceWorkflow({
   );
   const [detailSensitivity, setDetailSensitivity] = useState(55);
   const [cleanup, setCleanup] = useState(4);
-  const [edgeCleanupPercent, setEdgeCleanupPercent] = useState(12);
+  const [edgeCleanupPercent, setEdgeCleanupPercent] = useState(0);
+  const [preserveFineDetail, setPreserveFineDetail] = useState(true);
+  const [polarity, setPolarity] = useState<'auto' | 'dark' | 'light'>('auto');
   const [targetWidthInput, setTargetWidthInput] = useState(
     formatInputMillimeters(currentWidth),
   );
@@ -489,6 +491,8 @@ export function PhotoTraceWorkflow({
     detailSensitivity,
     cleanup,
     edgeCleanupPercent,
+    preserveFineDetail,
+    polarity,
     ...QUAD_CORNERS.flatMap((corner) => [quad[corner].x, quad[corner].y]),
   ].join('|');
   const latestTraceInputSignatureRef = useRef(traceInputSignature);
@@ -547,6 +551,8 @@ export function PhotoTraceWorkflow({
           cleanup,
           edgeCleanupPercent,
           preserveCanvas: true,
+          preserveFineDetail,
+          polarity,
         });
         putRasterOnCanvas(previewCanvas, processed);
         let blackPixels = 0;
@@ -572,6 +578,8 @@ export function PhotoTraceWorkflow({
     cleanup,
     detailSensitivity,
     edgeCleanupPercent,
+    preserveFineDetail,
+    polarity,
     open,
     quad,
     quadError,
@@ -765,6 +773,8 @@ export function PhotoTraceWorkflow({
         cleanup,
         edgeCleanupPercent,
         preserveCanvas: true,
+        preserveFineDetail,
+        polarity,
       });
       let formalBlackPixels = 0;
       for (let pixel = 0; pixel < processed.data.length; pixel += 4) {
@@ -788,7 +798,11 @@ export function PhotoTraceWorkflow({
         ],
         colorsampling: 0,
         colorquantcycles: 1,
-        pathomit: cleanup === 0 ? 0 : Math.min(2, Math.floor(cleanup / 3) + 1),
+        pathomit: preserveFineDetail
+          ? 0
+          : cleanup === 0
+            ? 0
+            : Math.min(2, Math.floor(cleanup / 3) + 1),
         ltres: 0.55,
         qtres: 0.55,
         rightangleenhance: true,
@@ -1191,6 +1205,47 @@ export function PhotoTraceWorkflow({
                 </p>
               )}
             </div>
+            <div className="space-y-3 rounded-xl border bg-muted/30 p-3">
+              <p className="text-sm font-medium">识别方向</p>
+              <div
+                className="flex flex-wrap gap-2"
+                role="group"
+                aria-label="压印明暗选择"
+              >
+                {(
+                  [
+                    ['auto', '自动比较'],
+                    ['dark', '深色压痕'],
+                    ['light', '浅色压痕'],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Button
+                    key={value}
+                    type="button"
+                    size="sm"
+                    variant={polarity === value ? 'default' : 'outline'}
+                    aria-pressed={polarity === value}
+                    onClick={() => setPolarity(value)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+              <label className="flex cursor-pointer items-start gap-2 text-sm leading-6">
+                <input
+                  type="checkbox"
+                  className="mt-1 size-4 accent-[var(--primary)]"
+                  checked={preserveFineDetail}
+                  onChange={(event) =>
+                    setPreserveFineDetail(event.target.checked)
+                  }
+                />
+                <span>优先保留细字和笔画（默认，不自动模糊或连笔）</span>
+              </label>
+              <p className="text-xs leading-5 text-muted-foreground">
+                若皮纹太多可取消勾选比较，但平滑模式可能使小字粘连，须对照原照片检查。
+              </p>
+            </div>
             <RangeField
               id="trace-detail-sensitivity"
               label="图文完整度"
@@ -1225,7 +1280,7 @@ export function PhotoTraceWorkflow({
               onChange={setEdgeCleanupPercent}
             />
             <p className="-mt-2 text-xs leading-5 text-muted-foreground">
-              默认12%用于排除旧皮牌边缘；如果图案本身贴近框选边缘，请适当调低。
+              默认不删边缘，以免误删贴近成品边的小字。仅当旧缝线进入图文时再逐步增加；优先使用下方的局部排除。
             </p>
             {source && (
               <p className="text-sm text-muted-foreground">

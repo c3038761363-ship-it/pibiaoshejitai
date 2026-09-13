@@ -30,6 +30,8 @@ export type TracePreprocessOptions = {
   cleanup: number;
   edgeCleanupPercent: number;
   preserveCanvas?: boolean;
+  preserveFineDetail?: boolean;
+  polarity?: 'auto' | 'dark' | 'light';
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -548,7 +550,11 @@ export function preprocessForTrace(
   }
 
   const cleanup = clamp(Math.round(options.cleanup), 0, 10);
-  const fineBlurRadius = Math.floor(cleanup / 5) + 1;
+  // Small photographed letters can be only a few pixels tall. Blurring and
+  // closing a 3x3 neighbourhood must be an explicit smoothing choice, not the
+  // default: both operations can irreversibly join letters and fill counters.
+  const preserveFineDetail = options.preserveFineDetail !== false;
+  const fineBlurRadius = preserveFineDetail ? 0 : Math.floor(cleanup / 5) + 1;
   const smoothed = boxBlur(gray, width, height, fineBlurRadius);
   const minimumDimension = Math.min(width, height);
   const largestOddKernel = Math.max(
@@ -613,7 +619,12 @@ export function preprocessForTrace(
     bounds,
     options.detailSensitivity,
   );
-  let mask = chooseStructuralMask(darkCandidate, lightCandidate);
+  let mask =
+    options.polarity === 'dark'
+      ? darkCandidate.mask
+      : options.polarity === 'light'
+        ? lightCandidate.mask
+        : chooseStructuralMask(darkCandidate, lightCandidate);
 
   removeEdgeConnectedBlackAreas(
     mask,
@@ -621,12 +632,16 @@ export function preprocessForTrace(
     height,
     options.edgeCleanupPercent,
   );
-  mask = closeSinglePixelGaps(mask, width, height);
+  if (!preserveFineDetail) mask = closeSinglePixelGaps(mask, width, height);
   removeSmallBlackAreas(
     mask,
     width,
     height,
-    cleanup === 0 ? 1 : Math.max(2, Math.round((cleanup * cleanup) / 2)),
+    preserveFineDetail
+      ? Math.max(1, Math.floor(cleanup / 5))
+      : cleanup === 0
+        ? 1
+        : Math.max(2, Math.round((cleanup * cleanup) / 2)),
   );
 
   // A label-coordinate trace keeps the full corrected label canvas so every
