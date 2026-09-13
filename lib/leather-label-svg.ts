@@ -62,6 +62,10 @@ export function formatMm(value: number) {
   return Number(value.toFixed(3)).toString();
 }
 
+function formatScale(value: number) {
+  return Number(value.toFixed(9)).toString();
+}
+
 export function getLabelLayout(input: LabelLayoutInput) {
   const groupX = (input.width * input.groupXPercent) / 100;
   const spacing = Math.min(input.markSize * 0.88, input.width * 0.18);
@@ -159,19 +163,31 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
     )}">${escapeXml(config.markText)}</text>
   </g>`;
 
+  const assetUsesLabelCoordinates =
+    config.asset?.vector?.coordinateSpace === 'label';
+  const assetWidth = assetUsesLabelCoordinates
+    ? (config.asset?.vector?.calibratedWidth ?? config.width)
+    : (config.asset?.width ?? 0);
+  const assetHeight = assetUsesLabelCoordinates
+    ? (config.asset?.vector?.calibratedHeight ?? config.height)
+    : (config.asset?.height ?? 0);
   const assetX = config.asset
-    ? (config.width * config.asset.xPercent) / 100 - config.asset.width / 2
+    ? assetUsesLabelCoordinates
+      ? 0
+      : (config.width * config.asset.xPercent) / 100 - assetWidth / 2
     : 0;
   const assetY = config.asset
-    ? (config.height * config.asset.yPercent) / 100 - config.asset.height / 2
+    ? assetUsesLabelCoordinates
+      ? 0
+      : (config.height * config.asset.yPercent) / 100 - assetHeight / 2
     : 0;
   const assetMarkup = config.asset?.vector
     ? `<g id="客户自动描绘矢量" transform="translate(${formatMm(
         assetX,
-      )} ${formatMm(assetY)}) scale(${formatMm(
-        config.asset.width / config.asset.vector.viewBoxWidth,
-      )} ${formatMm(
-        config.asset.height / config.asset.vector.viewBoxHeight,
+      )} ${formatMm(assetY)}) scale(${formatScale(
+        assetWidth / config.asset.vector.viewBoxWidth,
+      )} ${formatScale(
+        assetHeight / config.asset.vector.viewBoxHeight,
       )})" fill="${escapeXml(
         config.stampColor,
       )}" fill-rule="evenodd" stroke="none">
@@ -184,8 +200,8 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
           config.asset.dataUrl,
         )}" x="${formatMm(assetX)}" y="${formatMm(
           assetY,
-        )}" width="${formatMm(config.asset.width)}" height="${formatMm(
-          config.asset.height,
+        )}" width="${formatMm(assetWidth)}" height="${formatMm(
+          assetHeight,
         )}" preserveAspectRatio="xMidYMid meet" /></g>`
       : '';
 

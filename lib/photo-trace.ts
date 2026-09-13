@@ -1,8 +1,13 @@
-export type NormalizedCrop = {
+export type NormalizedPoint = {
   x: number;
   y: number;
-  width: number;
-  height: number;
+};
+
+export type NormalizedQuad = {
+  nw: NormalizedPoint;
+  ne: NormalizedPoint;
+  se: NormalizedPoint;
+  sw: NormalizedPoint;
 };
 
 export type RasterData = {
@@ -15,12 +20,16 @@ export type TracedVector = {
   viewBoxWidth: number;
   viewBoxHeight: number;
   paths: string[];
+  coordinateSpace?: 'artwork' | 'label';
+  calibratedWidth?: number;
+  calibratedHeight?: number;
 };
 
 export type TracePreprocessOptions = {
   detailSensitivity: number;
   cleanup: number;
   edgeCleanupPercent: number;
+  preserveCanvas?: boolean;
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -507,6 +516,21 @@ function maskToTrimmedRaster(mask: Uint8Array, width: number, height: number) {
   return { width: outputWidth, height: outputHeight, data: output };
 }
 
+function maskToRaster(mask: Uint8Array, width: number, height: number) {
+  const output = new Uint8ClampedArray(width * height * 4);
+
+  for (let pixel = 0; pixel < mask.length; pixel += 1) {
+    const value = mask[pixel] === 1 ? 0 : 255;
+    const outputIndex = pixel * 4;
+    output[outputIndex] = value;
+    output[outputIndex + 1] = value;
+    output[outputIndex + 2] = value;
+    output[outputIndex + 3] = 255;
+  }
+
+  return { width, height, data: output };
+}
+
 export function preprocessForTrace(
   source: RasterData,
   options: TracePreprocessOptions,
@@ -605,9 +629,12 @@ export function preprocessForTrace(
     cleanup === 0 ? 1 : Math.max(2, Math.round((cleanup * cleanup) / 2)),
   );
 
-  // Trimming after removing the old label body makes the new vector scale from
-  // the artwork itself instead of from the customer's photographed leather.
-  return maskToTrimmedRaster(mask, width, height);
+  // A label-coordinate trace keeps the full corrected label canvas so every
+  // letter and line retains its original physical position. The older artwork
+  // workflow can still request a tightly trimmed raster.
+  return options.preserveCanvas
+    ? maskToRaster(mask, width, height)
+    : maskToTrimmedRaster(mask, width, height);
 }
 
 export function extractBlackVectorPaths(svg: string): string[] {

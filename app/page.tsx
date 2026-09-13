@@ -194,8 +194,23 @@ export default function Home() {
   const mainFontOption = getFont(mainFont);
   const subFontOption = getFont(subFont);
   const markColor = markUsesStampColor ? stampColor : markOwnColor;
+  const isLabelCoordinateAsset =
+    asset?.kind === 'traced-vector' &&
+    asset.vector?.coordinateSpace === 'label';
+  const calibratedAssetWidth = isLabelCoordinateAsset
+    ? (asset.vector?.calibratedWidth ?? size.width)
+    : 0;
+  const calibratedAssetHeight = isLabelCoordinateAsset
+    ? (asset.vector?.calibratedHeight ?? size.height)
+    : 0;
+  const labelCoordinateSizeMismatch =
+    isLabelCoordinateAsset &&
+    (Math.abs(calibratedAssetWidth - size.width) > 0.001 ||
+      Math.abs(calibratedAssetHeight - size.height) > 0.001);
   const maxAssetWidth = Math.max(6, size.width - 8);
-  const effectiveAssetWidth = Math.min(assetWidth, maxAssetWidth);
+  const effectiveAssetWidth = isLabelCoordinateAsset
+    ? calibratedAssetWidth
+    : Math.min(assetWidth, maxAssetWidth);
   const maxMarkSize = Math.max(
     7,
     Math.min(28, size.height - 8, size.width / 3),
@@ -203,10 +218,21 @@ export default function Home() {
   const effectiveMarkSize = Math.min(markSize, maxMarkSize);
   const effectiveStitchInset = Math.min(stitchInset, size.width / 4);
   const assetHeight = asset
-    ? Math.max(3, effectiveAssetWidth / Math.max(0.2, asset.aspectRatio))
+    ? isLabelCoordinateAsset
+      ? calibratedAssetHeight
+      : Math.max(3, effectiveAssetWidth / Math.max(0.2, asset.aspectRatio))
     : 0;
-  const assetKind =
-    asset?.kind === 'traced-vector'
+  const effectiveAssetXPercent = assetXPercent;
+  const effectiveAssetYPercent = assetYPercent;
+  const effectiveAssetX = isLabelCoordinateAsset
+    ? 0
+    : (size.width * effectiveAssetXPercent) / 100 - effectiveAssetWidth / 2;
+  const effectiveAssetY = isLabelCoordinateAsset
+    ? 0
+    : (size.height * effectiveAssetYPercent) / 100 - assetHeight / 2;
+  const assetKind = isLabelCoordinateAsset
+    ? '按成品坐标锁定的描绘曲线'
+    : asset?.kind === 'traced-vector'
       ? '自动描绘矢量曲线'
       : asset?.kind === 'svg'
         ? 'SVG图案'
@@ -432,9 +458,9 @@ export default function Home() {
       lefts.push(layout.markX - effectiveMarkSize / 2);
       rights.push(layout.markX + effectiveMarkSize / 2);
     }
-    if (asset) {
-      const y = (size.height * assetYPercent) / 100;
-      const x = (size.width * assetXPercent) / 100;
+    if (asset && !isLabelCoordinateAsset) {
+      const y = (size.height * effectiveAssetYPercent) / 100;
+      const x = (size.width * effectiveAssetXPercent) / 100;
       tops.push(y - assetHeight / 2);
       bottoms.push(y + assetHeight / 2);
       lefts.push(x - effectiveAssetWidth / 2);
@@ -450,8 +476,8 @@ export default function Home() {
   }, [
     asset,
     assetHeight,
-    assetXPercent,
-    assetYPercent,
+    effectiveAssetXPercent,
+    effectiveAssetYPercent,
     effectiveAssetWidth,
     effectiveMarkSize,
     fontSize,
@@ -462,6 +488,7 @@ export default function Home() {
     letterSpacing,
     mainText,
     markShape,
+    isLabelCoordinateAsset,
     size.height,
     size.width,
     subText,
@@ -500,8 +527,8 @@ export default function Home() {
               vector: asset.vector,
               width: effectiveAssetWidth,
               height: assetHeight,
-              xPercent: assetXPercent,
-              yPercent: assetYPercent,
+              xPercent: effectiveAssetXPercent,
+              yPercent: effectiveAssetYPercent,
             }
           : null,
       }),
@@ -509,8 +536,8 @@ export default function Home() {
       asset,
       assetHeight,
       effectiveAssetWidth,
-      assetXPercent,
-      assetYPercent,
+      effectiveAssetXPercent,
+      effectiveAssetYPercent,
       category,
       dashGap,
       dashLength,
@@ -560,12 +587,6 @@ export default function Home() {
     const targetHeight = Number(result.targetHeight.toFixed(1));
     const vectorRatio =
       result.vector.viewBoxWidth / Math.max(1, result.vector.viewBoxHeight);
-    const safeWidth = Math.max(3, targetWidth - 8);
-    const safeHeight = Math.max(3, targetHeight - 10);
-    const fittedWidth = Math.max(
-      3,
-      Math.min(safeWidth, safeHeight * vectorRatio),
-    );
 
     setCustomWidthInput(targetWidth.toFixed(1));
     setCustomHeightInput(targetHeight.toFixed(1));
@@ -578,7 +599,7 @@ export default function Home() {
       aspectRatio: vectorRatio,
       vector: result.vector,
     });
-    setAssetWidth(Number(fittedWidth.toFixed(1)));
+    setAssetWidth(targetWidth);
     setAssetXPercent(50);
     setAssetYPercent(50);
     setFileName(result.name);
@@ -635,7 +656,7 @@ export default function Home() {
   }
 
   function downloadSvg() {
-    if (customSizeError) return;
+    if (customSizeError || labelCoordinateSizeMismatch) return;
     const blob = new Blob([exportSvg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -892,15 +913,14 @@ export default function Home() {
                 />
                 {asset?.kind === 'traced-vector' && asset.vector && (
                   <svg
-                    x={
-                      (size.width * assetXPercent) / 100 -
-                      effectiveAssetWidth / 2
-                    }
-                    y={(size.height * assetYPercent) / 100 - assetHeight / 2}
+                    x={effectiveAssetX}
+                    y={effectiveAssetY}
                     width={effectiveAssetWidth}
                     height={assetHeight}
                     viewBox={`0 0 ${asset.vector.viewBoxWidth} ${asset.vector.viewBoxHeight}`}
-                    preserveAspectRatio="xMidYMid meet"
+                    preserveAspectRatio={
+                      isLabelCoordinateAsset ? 'none' : 'xMidYMid meet'
+                    }
                     overflow="visible"
                   >
                     <g fill={stampColor} fillRule="evenodd" stroke="none">
@@ -913,11 +933,8 @@ export default function Home() {
                 {asset?.kind !== 'traced-vector' && asset?.dataUrl && (
                   <image
                     href={asset.dataUrl}
-                    x={
-                      (size.width * assetXPercent) / 100 -
-                      effectiveAssetWidth / 2
-                    }
-                    y={(size.height * assetYPercent) / 100 - assetHeight / 2}
+                    x={effectiveAssetX}
+                    y={effectiveAssetY}
                     width={effectiveAssetWidth}
                     height={assetHeight}
                     preserveAspectRatio="xMidYMid meet"
@@ -979,6 +996,14 @@ export default function Home() {
             <div className="preview-warning">
               <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
               图文已接近缝线或成品边缘，请调整大小、字距或位置后再制版。
+            </div>
+          )}
+          {labelCoordinateSizeMismatch && (
+            <div className="preview-warning">
+              <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+              当前成品尺寸与照片校正时的 {formatMm(calibratedAssetWidth)} ×{' '}
+              {formatMm(calibratedAssetHeight)} mm
+              不一致。为避免图文被拉伸，请改回原尺寸或重新进行照片描绘。
             </div>
           )}
           <div className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -1098,7 +1123,7 @@ export default function Home() {
               <div>
                 <p className="font-medium">客户只提供照片时</p>
                 <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                  上传整张照片，框选其中一款图文，去除皮纹和阴影后自动描成矢量曲线，并按输入的成品毫米尺寸放入画布。
+                  上传整张照片，选四角拉正其中一块皮牌，输入成品毫米尺寸；生成曲线时会保留图文原来的边距和位置。
                 </p>
               </div>
               <PhotoTraceWorkflow
@@ -1154,36 +1179,54 @@ export default function Home() {
                     </Button>
                   </div>
                 </div>
-                <RangeField
-                  id="asset-width"
-                  label="客户图案宽度"
-                  value={effectiveAssetWidth}
-                  unit="mm"
-                  min={6}
-                  max={maxAssetWidth}
-                  step={0.5}
-                  onChange={setAssetWidth}
-                />
-                <RangeField
-                  id="asset-x-position"
-                  label="客户图案左右位置"
-                  value={assetXPercent}
-                  unit="%"
-                  min={12}
-                  max={88}
-                  step={1}
-                  onChange={setAssetXPercent}
-                />
-                <RangeField
-                  id="asset-y-position"
-                  label="客户图案上下位置"
-                  value={assetYPercent}
-                  unit="%"
-                  min={12}
-                  max={80}
-                  step={1}
-                  onChange={setAssetYPercent}
-                />
+                {isLabelCoordinateAsset ? (
+                  <div
+                    className={`rounded-xl border p-3 text-sm leading-6 ${labelCoordinateSizeMismatch ? 'border-amber-600/25 bg-amber-500/10 text-amber-900' : 'border-emerald-600/25 bg-emerald-500/[0.07] text-emerald-900'}`}
+                  >
+                    <span className="font-medium">
+                      已锁定为 {formatMm(calibratedAssetWidth)} ×{' '}
+                      {formatMm(calibratedAssetHeight)} mm 成品坐标
+                    </span>
+                    <span className="block">
+                      {labelCoordinateSizeMismatch
+                        ? '当前成品尺寸已经改变，已暂停导出，防止旧图文被拉伸。请改回原尺寸或重新描绘。'
+                        : '图文会保持四角校正后的原始边距和位置，不再自动居中、缩放或铺满画布。'}
+                    </span>
+                  </div>
+                ) : (
+                  <>
+                    <RangeField
+                      id="asset-width"
+                      label="客户图案宽度"
+                      value={effectiveAssetWidth}
+                      unit="mm"
+                      min={6}
+                      max={maxAssetWidth}
+                      step={0.5}
+                      onChange={setAssetWidth}
+                    />
+                    <RangeField
+                      id="asset-x-position"
+                      label="客户图案左右位置"
+                      value={assetXPercent}
+                      unit="%"
+                      min={12}
+                      max={88}
+                      step={1}
+                      onChange={setAssetXPercent}
+                    />
+                    <RangeField
+                      id="asset-y-position"
+                      label="客户图案上下位置"
+                      value={assetYPercent}
+                      unit="%"
+                      min={12}
+                      max={80}
+                      step={1}
+                      onChange={setAssetYPercent}
+                    />
+                  </>
+                )}
               </>
             )}
 
@@ -1238,7 +1281,11 @@ export default function Home() {
               size="lg"
               className="h-11 w-full"
               onClick={downloadSvg}
-              disabled={Boolean(customSizeError || contentWarning)}
+              disabled={Boolean(
+                customSizeError ||
+                contentWarning ||
+                labelCoordinateSizeMismatch,
+              )}
             >
               {exported ? (
                 <Check aria-hidden="true" />
