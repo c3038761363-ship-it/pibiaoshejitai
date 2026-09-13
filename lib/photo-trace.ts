@@ -16,6 +16,21 @@ export type RasterData = {
   data: Uint8ClampedArray;
 };
 
+export type NormalizedRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type VectorOverlay = {
+  paths: string[];
+  x: number;
+  y: number;
+  scaleX: number;
+  scaleY: number;
+};
+
 export type TracedVector = {
   viewBoxWidth: number;
   viewBoxHeight: number;
@@ -23,6 +38,10 @@ export type TracedVector = {
   coordinateSpace?: 'artwork' | 'label';
   calibratedWidth?: number;
   calibratedHeight?: number;
+  overlays?: VectorOverlay[];
+  sourcePixelsPerMillimeter?: number;
+  manualTextCount?: number;
+  excludedRegionCount?: number;
 };
 
 export type TracePreprocessOptions = {
@@ -531,6 +550,69 @@ function maskToRaster(mask: Uint8Array, width: number, height: number) {
   }
 
   return { width, height, data: output };
+}
+
+export function eraseRasterRegions(
+  source: RasterData,
+  regions: NormalizedRect[],
+): RasterData {
+  if (regions.length === 0) return source;
+  const output = new Uint8ClampedArray(source.data);
+  for (const region of regions) {
+    const left = Math.max(0, Math.floor(region.x * source.width));
+    const top = Math.max(0, Math.floor(region.y * source.height));
+    const right = Math.min(
+      source.width,
+      Math.ceil((region.x + region.width) * source.width),
+    );
+    const bottom = Math.min(
+      source.height,
+      Math.ceil((region.y + region.height) * source.height),
+    );
+    for (let y = top; y < bottom; y += 1) {
+      for (let x = left; x < right; x += 1) {
+        const pixel = (y * source.width + x) * 4;
+        output[pixel] = 255;
+        output[pixel + 1] = 255;
+        output[pixel + 2] = 255;
+        output[pixel + 3] = 255;
+      }
+    }
+  }
+  return { ...source, data: output };
+}
+
+export function restoreRasterRegions(
+  base: RasterData,
+  detail: RasterData,
+  regions: NormalizedRect[],
+): RasterData {
+  if (regions.length === 0) return base;
+  if (base.width !== detail.width || base.height !== detail.height)
+    throw new Error('细线预览与成品坐标不一致，请重新生成。');
+  const output = new Uint8ClampedArray(base.data);
+  for (const region of regions) {
+    const left = Math.max(0, Math.floor(region.x * base.width));
+    const top = Math.max(0, Math.floor(region.y * base.height));
+    const right = Math.min(
+      base.width,
+      Math.ceil((region.x + region.width) * base.width),
+    );
+    const bottom = Math.min(
+      base.height,
+      Math.ceil((region.y + region.height) * base.height),
+    );
+    for (let y = top; y < bottom; y += 1) {
+      for (let x = left; x < right; x += 1) {
+        const pixel = (y * base.width + x) * 4;
+        output[pixel] = detail.data[pixel];
+        output[pixel + 1] = detail.data[pixel + 1];
+        output[pixel + 2] = detail.data[pixel + 2];
+        output[pixel + 3] = 255;
+      }
+    }
+  }
+  return { ...base, data: output };
 }
 
 export function preprocessForTrace(

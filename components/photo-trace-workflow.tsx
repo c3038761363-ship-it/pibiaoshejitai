@@ -16,7 +16,11 @@ import {
   useState,
 } from 'react';
 
-import { DimensionInput, RangeField } from '@/components/leather-label-ui';
+import {
+  DimensionInput,
+  FontField,
+  RangeField,
+} from '@/components/leather-label-ui';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -29,13 +33,19 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { getFont } from '@/lib/label-options';
 import {
+  eraseRasterRegions,
   extractBlackVectorPaths,
   preprocessForTrace,
+  restoreRasterRegions,
   type NormalizedPoint,
   type NormalizedQuad,
+  type NormalizedRect,
   type RasterData,
+  type TracePreprocessOptions,
   type TracedVector,
+  type VectorOverlay,
 } from '@/lib/photo-trace';
 
 type PhotoSource = {
@@ -58,6 +68,14 @@ type PhotoViewport = {
   y: number;
   width: number;
   height: number;
+};
+
+type CorrectionRegion = {
+  id: number;
+  kind: 'erase' | 'text' | 'keep';
+  rect: NormalizedRect;
+  text?: string;
+  fontId?: string;
 };
 
 const FULL_PHOTO_VIEWPORT: PhotoViewport = {
@@ -437,6 +455,107 @@ function putRasterOnCanvas(canvas: HTMLCanvasElement, raster: RasterData) {
   context.putImageData(image, 0, 0);
 }
 
+function normalizedSelection(
+  first: NormalizedPoint,
+  second: NormalizedPoint,
+): NormalizedRect {
+  const x = Math.min(first.x, second.x);
+  const y = Math.min(first.y, second.y);
+  return {
+    x,
+    y,
+    width: Math.abs(first.x - second.x),
+    height: Math.abs(first.y - second.y),
+  };
+}
+
+function renderConfirmedText(
+  text: string,
+  fontId: string,
+  widthMm: number,
+  heightMm: number,
+): RasterData {
+  const canvas = document.createElement('canvas');
+  // Sample both axes at one physical scale. Independent minimum dimensions
+  // would stretch narrow or tall lettering when mapped back to the label.
+  const pixelsPerMillimeter = Math.min(48, 1800 / widthMm, 1400 / heightMm);
+  canvas.width = Math.max(1, Math.round(widthMm * pixelsPerMillimeter));
+  canvas.height = Math.max(1, Math.round(heightMm * pixelsPerMillimeter));
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) throw new Error('无法生成文字曲线，请检查浏览器的画布功能。');
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#000';
+  context.textAlign = 'center';
+  context.textBaseline = 'alphabetic';
+  const family = getFont(fontId).stack;
+  let fontSize = Math.max(16, Math.floor(canvas.height * 0.8));
+  context.font = `700 ${fontSize}px ${family}`;
+  let metrics = context.measureText(text);
+  const inkHeight =
+    metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
+  const fit = Math.min(
+    (canvas.width * 0.94) / Math.max(1, metrics.width),
+    (canvas.height * 0.84) / Math.max(1, inkHeight),
+  );
+  fontSize = Math.max(8, Math.floor(fontSize * fit));
+  context.font = `700 ${fontSize}px ${family}`;
+  metrics = context.measureText(text);
+  if (
+    metrics.width > canvas.width * 0.98 ||
+    metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent >
+      canvas.height * 0.98
+  ) {
+    throw new Error(`“${text}”放不进所选范围，请扩大框选或分成两行重绘。`);
+  }
+  const baseline =
+    (canvas.height +
+      metrics.actualBoundingBoxAscent -
+      metrics.actualBoundingBoxDescent) /
+    2;
+  context.fillText(text, canvas.width / 2, baseline);
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  for (let pixel = 0; pixel < image.data.length; pixel += 4) {
+    const value = image.data[pixel] < 176 ? 0 : 255;
+    image.data[pixel] = value;
+    image.data[pixel + 1] = value;
+    image.data[pixel + 2] = value;
+    image.data[pixel + 3] = 255;
+  }
+  return {
+    width: canvas.width,
+    height: canvas.height,
+    data: image.data,
+  };
+}
+
+function preprocessWithCorrections(
+  corrected: RasterData,
+  options: TracePreprocessOptions,
+  corrections: CorrectionRegion[],
+) {
+  let processed = preprocessForTrace(corrected, options);
+  const kept = corrections
+    .filter((correction) => correction.kind === 'keep')
+    .map((correction) => correction.rect);
+  if (kept.length > 0) {
+    const detail = preprocessForTrace(corrected, {
+      ...options,
+      detailSensitivity: 95,
+      cleanup: 0,
+      edgeCleanupPercent: 0,
+      preserveFineDetail: true,
+    });
+    processed = restoreRasterRegions(processed, detail, kept);
+  }
+  return eraseRasterRegions(
+    processed,
+    corrections
+      .filter((correction) => correction.kind !== 'keep')
+      .map((correction) => correction.rect),
+  );
+}
+
 export function PhotoTraceWorkflow({
   currentWidth,
   currentHeight,
@@ -474,12 +593,21 @@ export function PhotoTraceWorkflow({
   const [redrawArmed, setRedrawArmed] = useState(false);
   const [photoViewport, setPhotoViewport] =
     useState<PhotoViewport>(FULL_PHOTO_VIEWPORT);
+  const [corrections, setCorrections] = useState<CorrectionRegion[]>([]);
+  const [selection, setSelection] = useState<NormalizedRect | null>(null);
+  const [correctionText, setCorrectionText] = useState('');
+  const [correctionFontId, setCorrectionFontId] = useState('arial-black');
+  const [textChecked, setTextChecked] = useState(false);
 
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
   const uploadSequenceRef = useRef(0);
   const calibrationSurfaceRef = useRef<HTMLDivElement | null>(null);
   const rectifiedCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const refinementCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const refinementSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const refinementDragRef = useRef<NormalizedPoint | null>(null);
+  const nextCorrectionIdRef = useRef(1);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<DragOperation | null>(null);
   const sizeResult = validateTargetSize(targetWidthInput, targetHeightInput);
@@ -493,6 +621,16 @@ export function PhotoTraceWorkflow({
     edgeCleanupPercent,
     preserveFineDetail,
     polarity,
+    ...corrections.flatMap((correction) => [
+      correction.id,
+      correction.kind,
+      correction.rect.x,
+      correction.rect.y,
+      correction.rect.width,
+      correction.rect.height,
+      correction.text ?? '',
+      correction.fontId ?? '',
+    ]),
     ...QUAD_CORNERS.flatMap((corner) => [quad[corner].x, quad[corner].y]),
   ].join('|');
   const latestTraceInputSignatureRef = useRef(traceInputSignature);
@@ -522,6 +660,7 @@ export function PhotoTraceWorkflow({
     const timer = window.setTimeout(() => {
       const image = sourceImageRef.current;
       const rectifiedCanvas = rectifiedCanvasRef.current;
+      const refinementCanvas = refinementCanvasRef.current;
       const previewCanvas = previewCanvasRef.current;
       if (!image || !rectifiedCanvas || !previewCanvas || !sizeResult.value)
         return;
@@ -537,6 +676,7 @@ export function PhotoTraceWorkflow({
           900,
         );
         putRasterOnCanvas(rectifiedCanvas, corrected);
+        if (refinementCanvas) putRasterOnCanvas(refinementCanvas, corrected);
         setSourcePixelsPerMillimeter(
           getSourcePixelsPerMillimeter(
             source.width,
@@ -546,14 +686,18 @@ export function PhotoTraceWorkflow({
             sizeResult.value.height,
           ),
         );
-        const processed = preprocessForTrace(corrected, {
-          detailSensitivity,
-          cleanup,
-          edgeCleanupPercent,
-          preserveCanvas: true,
-          preserveFineDetail,
-          polarity,
-        });
+        const processed = preprocessWithCorrections(
+          corrected,
+          {
+            detailSensitivity,
+            cleanup,
+            edgeCleanupPercent,
+            preserveCanvas: true,
+            preserveFineDetail,
+            polarity,
+          },
+          corrections,
+        );
         putRasterOnCanvas(previewCanvas, processed);
         let blackPixels = 0;
         for (let pixel = 0; pixel < processed.data.length; pixel += 4) {
@@ -576,6 +720,7 @@ export function PhotoTraceWorkflow({
     return () => window.clearTimeout(timer);
   }, [
     cleanup,
+    corrections,
     detailSensitivity,
     edgeCleanupPercent,
     preserveFineDetail,
@@ -612,6 +757,9 @@ export function PhotoTraceWorkflow({
     sourceUrlRef.current = null;
     setVector(null);
     setVectorSignature('');
+    setCorrections([]);
+    setSelection(null);
+    setTextChecked(false);
     setPhotoViewport(FULL_PHOTO_VIEWPORT);
     image.onload = () => {
       if (uploadSequence !== uploadSequenceRef.current) {
@@ -668,6 +816,12 @@ export function PhotoTraceWorkflow({
   ) {
     const point = eventPoint(event);
     if (!point) return;
+    if (corrections.length > 0) {
+      setCorrections([]);
+      setSelection(null);
+      setTextChecked(false);
+      setError('选取范围或四角改变后，旧的局部修正已清空，请重新核对图文。');
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     const corner = nearestCorner(point.x, point.y, quad, photoViewport);
     const forceDraw = redrawArmed;
@@ -686,6 +840,9 @@ export function PhotoTraceWorkflow({
     };
     if (forceDraw || (!corner && !pointInQuad(point.x, point.y, quad))) {
       setRedrawArmed(false);
+      setCorrections([]);
+      setSelection(null);
+      setTextChecked(false);
       setQuad(rectangleToQuad(point.x, point.y, point.x, point.y));
     }
   }
@@ -741,6 +898,72 @@ export function PhotoTraceWorkflow({
     }
   }
 
+  function refinementPoint(event: ReactPointerEvent<HTMLDivElement>) {
+    const bounds = refinementSurfaceRef.current?.getBoundingClientRect();
+    if (!bounds) return null;
+    return {
+      x: clamp((event.clientX - bounds.left) / bounds.width),
+      y: clamp((event.clientY - bounds.top) / bounds.height),
+    };
+  }
+
+  function beginRefinementSelection(event: ReactPointerEvent<HTMLDivElement>) {
+    const point = refinementPoint(event);
+    if (!point) return;
+    refinementDragRef.current = point;
+    setTextChecked(false);
+    setSelection(normalizedSelection(point, point));
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveRefinementSelection(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = refinementDragRef.current;
+    const point = refinementPoint(event);
+    if (start && point) setSelection(normalizedSelection(start, point));
+  }
+
+  function endRefinementSelection(event: ReactPointerEvent<HTMLDivElement>) {
+    moveRefinementSelection(event);
+    refinementDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId))
+      event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function addCorrection(kind: CorrectionRegion['kind']) {
+    if (!selection || !sizeResult.value) return;
+    if (corrections.length >= 30) {
+      setError('最多添加30处局部修正，请先删除不需要的区域。');
+      return;
+    }
+    if (
+      selection.width * sizeResult.value.width < 0.5 ||
+      selection.height * sizeResult.value.height < 0.5
+    ) {
+      setError('选取区域太小，请重新拖出完整的文字或杂纹范围。');
+      return;
+    }
+    const exactText = correctionText.trim();
+    if (kind === 'text' && (!exactText || !textChecked)) {
+      setError('请填写客户确认的准确文字，并勾选“已逐字核对”。');
+      return;
+    }
+    setCorrections((current) => [
+      ...current,
+      {
+        id: nextCorrectionIdRef.current++,
+        kind,
+        rect: selection,
+        ...(kind === 'text'
+          ? { text: exactText, fontId: correctionFontId }
+          : {}),
+      },
+    ]);
+    setSelection(null);
+    setTextChecked(false);
+    if (kind === 'text') setCorrectionText('');
+    setError('');
+  }
+
   async function generateVector() {
     const image = sourceImageRef.current;
     if (!source || !image || !sizeResult.value || quadError) {
@@ -768,21 +991,28 @@ export function PhotoTraceWorkflow({
         sizeResult.value.height,
         1800,
       );
-      const processed = preprocessForTrace(corrected, {
-        detailSensitivity,
-        cleanup,
-        edgeCleanupPercent,
-        preserveCanvas: true,
-        preserveFineDetail,
-        polarity,
-      });
+      const processed = preprocessWithCorrections(
+        corrected,
+        {
+          detailSensitivity,
+          cleanup,
+          edgeCleanupPercent,
+          preserveCanvas: true,
+          preserveFineDetail,
+          polarity,
+        },
+        corrections,
+      );
       let formalBlackPixels = 0;
       for (let pixel = 0; pixel < processed.data.length; pixel += 4) {
         if (processed.data[pixel] === 0) formalBlackPixels += 1;
       }
       const formalInkRatio =
         formalBlackPixels / Math.max(1, processed.width * processed.height);
-      if (formalInkRatio < 0.001) {
+      if (
+        formalInkRatio < 0.001 &&
+        !corrections.some((correction) => correction.kind === 'text')
+      ) {
         throw new Error(
           '当前没有留下可描绘的图文，请提高“图文完整度”，或降低“去边框范围”。',
         );
@@ -813,11 +1043,59 @@ export function PhotoTraceWorkflow({
         desc: false,
       });
       const paths = extractBlackVectorPaths(tracedSvg);
-      const pathCharacters = paths.reduce(
-        (total, path) => total + path.length,
-        0,
-      );
-      if (paths.length === 0) {
+      const overlays: VectorOverlay[] = [];
+      for (const correction of corrections) {
+        if (correction.kind !== 'text' || !correction.text) continue;
+        const textRaster = renderConfirmedText(
+          correction.text,
+          correction.fontId ?? 'arial-black',
+          correction.rect.width * sizeResult.value.width,
+          correction.rect.height * sizeResult.value.height,
+        );
+        const textSvg = imageTracer.imagedataToSVG(textRaster, {
+          pal: [
+            { r: 0, g: 0, b: 0, a: 255 },
+            { r: 255, g: 255, b: 255, a: 255 },
+          ],
+          colorsampling: 0,
+          colorquantcycles: 1,
+          pathomit: 0,
+          ltres: 0.25,
+          qtres: 0.25,
+          rightangleenhance: true,
+          linefilter: false,
+          roundcoords: 3,
+          viewbox: true,
+          desc: false,
+        });
+        const textPaths = extractBlackVectorPaths(textSvg);
+        if (textPaths.length === 0)
+          throw new Error(
+            `“${correction.text}”没有生成可用字形，请换一种字体。`,
+          );
+        const targetWidth = correction.rect.width * processed.width;
+        const targetHeight = correction.rect.height * processed.height;
+        const uniformScale = Math.min(
+          targetWidth / textRaster.width,
+          targetHeight / textRaster.height,
+        );
+        overlays.push({
+          paths: textPaths,
+          x:
+            correction.rect.x * processed.width +
+            (targetWidth - textRaster.width * uniformScale) / 2,
+          y:
+            correction.rect.y * processed.height +
+            (targetHeight - textRaster.height * uniformScale) / 2,
+          scaleX: uniformScale,
+          scaleY: uniformScale,
+        });
+      }
+      const pathCharacters = [
+        ...paths,
+        ...overlays.flatMap((overlay) => overlay.paths),
+      ].reduce((total, path) => total + path.length, 0);
+      if (paths.length === 0 && overlays.length === 0) {
         throw new Error('没有生成可用曲线，请调整图文完整度后重试。');
       }
       if (pathCharacters > 2_500_000) {
@@ -830,9 +1108,21 @@ export function PhotoTraceWorkflow({
         viewBoxWidth: processed.width,
         viewBoxHeight: processed.height,
         paths,
+        overlays,
         coordinateSpace: 'label',
         calibratedWidth: sizeResult.value.width,
         calibratedHeight: sizeResult.value.height,
+        sourcePixelsPerMillimeter: getSourcePixelsPerMillimeter(
+          source.width,
+          source.height,
+          quad,
+          sizeResult.value.width,
+          sizeResult.value.height,
+        ),
+        manualTextCount: overlays.length,
+        excludedRegionCount: corrections.filter(
+          (correction) => correction.kind !== 'keep',
+        ).length,
       });
       setVectorSignature(generationSignature);
     } catch (traceError) {
@@ -903,6 +1193,9 @@ export function PhotoTraceWorkflow({
                       onClick={() => {
                         setPhotoViewport(FULL_PHOTO_VIEWPORT);
                         setRedrawArmed(true);
+                        setCorrections([]);
+                        setSelection(null);
+                        setTextChecked(false);
                       }}
                     >
                       <Crop aria-hidden="true" />
@@ -933,6 +1226,9 @@ export function PhotoTraceWorkflow({
                         setQuad(cloneQuad(DEFAULT_QUAD));
                         setPhotoViewport(FULL_PHOTO_VIEWPORT);
                         setRedrawArmed(false);
+                        setCorrections([]);
+                        setSelection(null);
+                        setTextChecked(false);
                       }}
                     >
                       <RotateCcw aria-hidden="true" />
@@ -1187,9 +1483,11 @@ export function PhotoTraceWorkflow({
               </p>
             </div>
             <div className="rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
-              <span className="font-medium">本阶段先验收位置与尺寸</span>
+              <span className="font-medium">
+                自动识别仍是候选，须对照客户原稿
+              </span>
               <span className="block">
-                照片的小字和皮纹仍可能描错；生成的是校正位置的参考曲线，不是可直接发给模具厂的纯图文文件。清晰字形与图案需要后续复核重绘。
+                模糊小字、皮纹和旧缝线仍可能描错。可在下方局部排除、加强细线或逐字重绘；导出纯图文前还须逐字、逐线核对。
               </span>
             </div>
             <div className="grid min-h-44 place-items-center overflow-hidden rounded-xl border bg-white p-2">
@@ -1284,7 +1582,8 @@ export function PhotoTraceWorkflow({
             </p>
             {source && (
               <p className="text-sm text-muted-foreground">
-                当前识别到的图文约占 {(inkRatio * 100).toFixed(1)}%
+                当前自动候选黑色覆盖约 {(inkRatio * 100).toFixed(1)}%
+                （不是识别准确率；手动重绘文字在生成曲线后显示）
               </p>
             )}
 
@@ -1308,7 +1607,7 @@ export function PhotoTraceWorkflow({
               <div className="space-y-2 rounded-xl border border-emerald-600/25 bg-emerald-500/[0.06] p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-emerald-800">
                   <Check className="size-4" aria-hidden="true" />
-                  曲线已生成，可以加入画布
+                  曲线候选已生成，请核对后加入画布
                 </div>
                 <div className="grid min-h-28 place-items-center overflow-hidden rounded-lg bg-white p-2">
                   <svg
@@ -1326,6 +1625,16 @@ export function PhotoTraceWorkflow({
                     <g fill="#111111" fillRule="evenodd" stroke="none">
                       {vector.paths.map((path, index) => (
                         <path key={`${path.slice(0, 24)}-${index}`} d={path} />
+                      ))}
+                      {vector.overlays?.map((overlay, overlayIndex) => (
+                        <g
+                          key={`confirmed-text-${overlayIndex}`}
+                          transform={`translate(${overlay.x} ${overlay.y}) scale(${overlay.scaleX} ${overlay.scaleY})`}
+                        >
+                          {overlay.paths.map((path, pathIndex) => (
+                            <path key={pathIndex} d={path} />
+                          ))}
+                        </g>
                       ))}
                     </g>
                   </svg>
@@ -1351,6 +1660,204 @@ export function PhotoTraceWorkflow({
             </p>
           </section>
         </div>
+
+        {source && !quadError && sizeResult.value && (
+          <section className="space-y-3 border-t px-5 py-4">
+            <div>
+              <p className="font-medium">5. 局部去杂纹与逐字重绘</p>
+              <p className="text-sm leading-6 text-muted-foreground">
+                在拉正照片上拖出一块区域：可加强保留浅色细线、排除皮纹或旧缝线，也可输入客户确认的文字重新生成清晰曲线。每次选一行文字。
+              </p>
+            </div>
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,.8fr)]">
+              <div className="rounded-xl border bg-[#24211f] p-2 sm:p-3">
+                <div
+                  ref={refinementSurfaceRef}
+                  role="img"
+                  aria-label="拉正照片的局部修正选区"
+                  className="relative mx-auto w-full cursor-crosshair touch-none overflow-hidden rounded-lg select-none"
+                  style={{
+                    aspectRatio: `${sizeResult.value.width} / ${sizeResult.value.height}`,
+                  }}
+                  onPointerDown={beginRefinementSelection}
+                  onPointerMove={moveRefinementSelection}
+                  onPointerUp={endRefinementSelection}
+                  onPointerCancel={endRefinementSelection}
+                >
+                  <canvas
+                    ref={refinementCanvasRef}
+                    className="pointer-events-none absolute inset-0 size-full"
+                  />
+                  {corrections.map((correction) => (
+                    <div
+                      key={correction.id}
+                      className={`pointer-events-none absolute border-2 ${correction.kind === 'text' ? 'border-sky-300 bg-sky-300/20' : correction.kind === 'keep' ? 'border-emerald-300 bg-emerald-300/20' : 'border-amber-300 bg-amber-300/20'}`}
+                      style={{
+                        left: `${correction.rect.x * 100}%`,
+                        top: `${correction.rect.y * 100}%`,
+                        width: `${correction.rect.width * 100}%`,
+                        height: `${correction.rect.height * 100}%`,
+                      }}
+                    />
+                  ))}
+                  {selection && (
+                    <div
+                      className="pointer-events-none absolute border-2 border-white bg-white/15"
+                      style={{
+                        left: `${selection.x * 100}%`,
+                        top: `${selection.y * 100}%`,
+                        width: `${selection.width * 100}%`,
+                        height: `${selection.height * 100}%`,
+                      }}
+                    />
+                  )}
+                </div>
+              </div>
+              <div className="space-y-3">
+                <p className="text-sm">
+                  {selection
+                    ? `已选 ${formatInputMillimeters(selection.width * sizeResult.value.width)} × ${formatInputMillimeters(selection.height * sizeResult.value.height)} mm`
+                    : '请先在左边拖出要处理的范围'}
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!selection}
+                  onClick={() => addCorrection('erase')}
+                >
+                  排除这处皮纹/旧边框
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="ml-2"
+                  disabled={!selection}
+                  onClick={() => addCorrection('keep')}
+                >
+                  加强保留这处细线/图案
+                </Button>
+                <div className="border-t pt-3">
+                  <label
+                    htmlFor="trace-corrected-text"
+                    className="mb-2 block text-sm font-medium"
+                  >
+                    这处文字的准确内容
+                  </label>
+                  <Input
+                    id="trace-corrected-text"
+                    value={correctionText}
+                    maxLength={80}
+                    placeholder="例如 DENIM WEAR"
+                    onChange={(event) => {
+                      setCorrectionText(event.target.value);
+                      setTextChecked(false);
+                    }}
+                  />
+                </div>
+                <FontField
+                  id="trace-corrected-font"
+                  label="重绘字体"
+                  value={correctionFontId}
+                  onChange={(value) => {
+                    setCorrectionFontId(value);
+                    setTextChecked(false);
+                  }}
+                />
+                {correctionText.trim() && (
+                  <div className="space-y-2 rounded-lg border bg-white p-3">
+                    <p className="text-xs text-muted-foreground">
+                      本次实际文字放大预览（请核对每个字母、数字及笔画）
+                    </p>
+                    <p
+                      className="overflow-x-auto whitespace-nowrap text-3xl font-bold text-black"
+                      style={{ fontFamily: getFont(correctionFontId).stack }}
+                    >
+                      {correctionText.trim()}
+                    </p>
+                    <p className="text-xs leading-5 text-amber-900">
+                      若电脑没有所选字体，浏览器可能改用替代字体；请以最终
+                      SVG/CDR 中的字形为准，必要时在 CDR 中人工重画。
+                    </p>
+                  </div>
+                )}
+                <label className="flex items-start gap-2 text-sm leading-6">
+                  <input
+                    type="checkbox"
+                    className="mt-1 size-4 accent-[var(--primary)]"
+                    checked={textChecked}
+                    onChange={(event) => setTextChecked(event.target.checked)}
+                  />
+                  <span>我已对照客户资料逐字核对内容，并检查所选字体外形</span>
+                </label>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={
+                    !selection || !correctionText.trim() || !textChecked
+                  }
+                  onClick={() => addCorrection('text')}
+                >
+                  将此处重绘为清晰文字
+                </Button>
+              </div>
+            </div>
+            {corrections.length > 0 && (
+              <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
+                <p className="text-sm font-medium">
+                  已添加的修正（可逐项撤销）
+                </p>
+                {corrections.map((correction, index) => (
+                  <div
+                    key={correction.id}
+                    className="flex items-center justify-between gap-3 text-sm"
+                  >
+                    <span className="truncate">
+                      {index + 1}.{' '}
+                      {correction.kind === 'text'
+                        ? `清晰文字：${correction.text}`
+                        : correction.kind === 'keep'
+                          ? '加强保留细线/图案'
+                          : '排除杂纹/旧边框'}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() =>
+                        setCorrections((current) =>
+                          current.filter((item) => item.id !== correction.id),
+                        )
+                      }
+                    >
+                      撤销
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs leading-5 text-muted-foreground">
+              这一步不会猜测照片里看不清的字。字体转成曲线后不依赖模具厂电脑的字体，但特殊品牌字形仍应以客户原稿或人工描字为准。
+            </p>
+            <Button
+              type="button"
+              className="w-full sm:w-auto"
+              onClick={generateVector}
+              disabled={busy || Boolean(quadError) || !sizeResult.value}
+            >
+              {busy ? (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ) : (
+                <WandSparkles aria-hidden="true" />
+              )}
+              {busy ? '正在重绘曲线…' : '按局部修正重新生成曲线'}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              生成后请回到上方第4步放大检查曲线，再加入画布。
+            </p>
+          </section>
+        )}
 
         <DialogFooter>
           <DialogClose render={<Button type="button" variant="outline" />}>

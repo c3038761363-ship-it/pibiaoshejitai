@@ -56,6 +56,7 @@ import {
 } from '@/lib/label-options';
 import {
   buildLeatherLabelSvg,
+  buildPhotoArtworkSvg,
   formatMm,
   getLabelLayout,
   type MarkLayout,
@@ -180,6 +181,7 @@ export default function Home() {
   const [assetYPercent, setAssetYPercent] = useState(27);
   const [uploadError, setUploadError] = useState('');
   const [exported, setExported] = useState(false);
+  const [photoArtworkReviewed, setPhotoArtworkReviewed] = useState(false);
 
   const customSizeResult = useMemo(
     () => validateCustomSize(customWidthInput, customHeightInput),
@@ -207,6 +209,17 @@ export default function Home() {
     isLabelCoordinateAsset &&
     (Math.abs(calibratedAssetWidth - size.width) > 0.001 ||
       Math.abs(calibratedAssetHeight - size.height) > 0.001);
+  const hasAdditionalDesignObjects = Boolean(
+    mainText.trim() || subText.trim() || markShape !== 'none',
+  );
+  const purePhotoArtworkReady = Boolean(
+    isLabelCoordinateAsset &&
+    asset?.vector &&
+    !labelCoordinateSizeMismatch &&
+    !customSizeError &&
+    !hasAdditionalDesignObjects &&
+    photoArtworkReviewed,
+  );
   const maxAssetWidth = Math.max(6, size.width - 8);
   const effectiveAssetWidth = isLabelCoordinateAsset
     ? calibratedAssetWidth
@@ -583,6 +596,7 @@ export default function Home() {
   }
 
   function handlePhotoTraceApply(result: PhotoTraceApplyResult) {
+    setPhotoArtworkReviewed(false);
     const targetWidth = Number(result.targetWidth.toFixed(1));
     const targetHeight = Number(result.targetHeight.toFixed(1));
     const vectorRatio =
@@ -612,6 +626,7 @@ export default function Home() {
   }
 
   function handleAssetUpload(event: ChangeEvent<HTMLInputElement>) {
+    setPhotoArtworkReviewed(false);
     const file = event.target.files?.[0];
     setUploadError('');
     if (!file) return;
@@ -668,6 +683,25 @@ export default function Home() {
     URL.revokeObjectURL(url);
     setExported(true);
     window.setTimeout(() => setExported(false), 3000);
+  }
+
+  function downloadPurePhotoArtwork() {
+    if (!purePhotoArtworkReady || !asset?.vector) return;
+    const svg = buildPhotoArtworkSvg(
+      asset.vector,
+      size.width,
+      size.height,
+      fileName,
+    );
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm_纯图文待复核.svg`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -926,6 +960,16 @@ export default function Home() {
                     <g fill={stampColor} fillRule="evenodd" stroke="none">
                       {asset.vector.paths.map((path, index) => (
                         <path key={`${path.slice(0, 24)}-${index}`} d={path} />
+                      ))}
+                      {asset.vector.overlays?.map((overlay, overlayIndex) => (
+                        <g
+                          key={`confirmed-text-${overlayIndex}`}
+                          transform={`translate(${overlay.x} ${overlay.y}) scale(${overlay.scaleX} ${overlay.scaleY})`}
+                        >
+                          {overlay.paths.map((path, pathIndex) => (
+                            <path key={pathIndex} d={path} />
+                          ))}
+                        </g>
                       ))}
                     </g>
                   </svg>
@@ -1292,11 +1336,64 @@ export default function Home() {
               ) : (
                 <Download aria-hidden="true" />
               )}
-              {exported ? '矢量稿已下载' : '下载CorelDRAW矢量稿'}
+              {exported
+                ? '矢量稿已下载'
+                : isLabelCoordinateAsset
+                  ? '下载完整皮牌示意稿（含皮色/缝线）'
+                  : '下载CorelDRAW矢量稿'}
             </Button>
-            <a className="cdr-helper-link" href="/保存为CDR助手.vbs" download>
-              下载CDR保存助手
+            {isLabelCoordinateAsset && asset?.vector && (
+              <div className="space-y-3 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
+                <p className="font-medium">单独保存纯图文曲线</p>
+                <p>
+                  此文件结构上仅有曲线路径，保留成品毫米画布，不额外加入皮色、照片或示意缝线；但自动描绘可能误取旧缝线、皮纹，模糊字也可能出错。须逐处核对，不能仅凭曲线生成就发给模具厂。
+                </p>
+                {(asset.vector.sourcePixelsPerMillimeter ?? 0) < 8 && (
+                  <p>
+                    当前照片约{' '}
+                    {(asset.vector.sourcePixelsPerMillimeter ?? 0).toFixed(1)}{' '}
+                    像素/mm；小字可能缺笔、粘连或误认。已手动重绘{' '}
+                    {asset.vector.manualTextCount ?? 0} 处文字。
+                  </p>
+                )}
+                {hasAdditionalDesignObjects && (
+                  <p>
+                    画布上还有单独输入的文字或徽标，纯图文下载不会包含它们。请先清空这些额外对象，或只下载完整示意稿。
+                  </p>
+                )}
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-1 size-4 accent-[var(--primary)]"
+                    checked={photoArtworkReviewed}
+                    onChange={(event) =>
+                      setPhotoArtworkReviewed(event.target.checked)
+                    }
+                  />
+                  <span>
+                    我已对照客户资料逐字、逐线核对全部保留内容，确认没有皮纹、旧缝线或错误字形混入；仍会在CDR里检查后再制模。
+                  </span>
+                </label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  onClick={downloadPurePhotoArtwork}
+                  disabled={!purePhotoArtworkReady}
+                >
+                  <Download aria-hidden="true" />
+                  下载纯图文曲线（待CDR复核）
+                </Button>
+              </div>
+            )}
+            <a className="cdr-helper-link" href="/ArtworkToCDR.vbs" download>
+              下载新版CDR保存助手
             </a>
+            {isLabelCoordinateAsset && (
+              <p className="text-xs leading-5 text-muted-foreground">
+                纯图文文件请用上面的新版助手；以前下载的旧助手会按图案外接框重设页面，不适用于纯图文稿。新版助手若无法核对页面毫米尺寸，会停止保存而不生成错误CDR。
+              </p>
+            )}
             <ol className="space-y-2 text-sm leading-6 text-muted-foreground">
               <li>
                 <StepNumber>1</StepNumber>下载矢量稿和保存助手。

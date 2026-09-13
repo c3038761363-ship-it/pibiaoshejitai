@@ -66,6 +66,55 @@ function formatScale(value: number) {
   return Number(value.toFixed(9)).toString();
 }
 
+function tracedVectorPathsMarkup(vector: TracedVector) {
+  const basePaths = vector.paths
+    .map((path) => `<path d="${escapeXml(path)}" />`)
+    .join('\n    ');
+  const confirmedText = (vector.overlays ?? [])
+    .map(
+      (
+        overlay,
+      ) => `<g transform="translate(${formatMm(overlay.x)} ${formatMm(overlay.y)}) scale(${formatScale(overlay.scaleX)} ${formatScale(overlay.scaleY)})">
+      ${overlay.paths
+        .map((path) => `<path d="${escapeXml(path)}" />`)
+        .join('\n      ')}
+    </g>`,
+    )
+    .join('\n    ');
+  return [basePaths, confirmedText].filter(Boolean).join('\n    ');
+}
+
+export function buildPhotoArtworkSvg(
+  vector: TracedVector,
+  width: number,
+  height: number,
+  fileName: string,
+) {
+  if (
+    vector.coordinateSpace !== 'label' ||
+    Math.abs((vector.calibratedWidth ?? 0) - width) > 0.001 ||
+    Math.abs((vector.calibratedHeight ?? 0) - height) > 0.001 ||
+    vector.paths.length +
+      (vector.overlays ?? []).reduce(
+        (count, overlay) => count + overlay.paths.length,
+        0,
+      ) ===
+      0
+  ) {
+    throw new Error('图文曲线与当前成品尺寸不一致，请重新描绘。');
+  }
+  const widthMm = formatMm(width);
+  const heightMm = formatMm(height);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true">
+  <title>${escapeXml(fileName)} — 纯图文 ${widthMm}×${heightMm}mm</title>
+  <desc>仅含曲线路径，不额外生成皮色、照片或示意缝线。自动描绘可能误取旧缝线或皮纹，使用前须逐字、逐线核对。</desc>
+  <g id="纯图文曲线" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
+    ${tracedVectorPathsMarkup(vector)}
+  </g>
+</svg>`;
+}
+
 export function getLabelLayout(input: LabelLayoutInput) {
   const groupX = (input.width * input.groupXPercent) / 100;
   const spacing = Math.min(input.markSize * 0.88, input.width * 0.18);
@@ -191,9 +240,7 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
       )})" fill="${escapeXml(
         config.stampColor,
       )}" fill-rule="evenodd" stroke="none">
-    ${config.asset.vector.paths
-      .map((path) => `<path d="${escapeXml(path)}" />`)
-      .join('\n    ')}
+    ${tracedVectorPathsMarkup(config.asset.vector)}
   </g>`
     : config.asset?.dataUrl
       ? `<g id="客户图案"><image href="${escapeXml(
