@@ -700,6 +700,14 @@ export function PhotoTraceWorkflow({
       quadError
     ) {
       setSourcePixelsPerMillimeter(null);
+      setDraftVector(null);
+      setDraftBusy(false);
+      setInkRatio(0);
+      const previewCanvas = previewCanvasRef.current;
+      if (previewCanvas) {
+        previewCanvas.width = 1;
+        previewCanvas.height = 1;
+      }
       return;
     }
 
@@ -794,11 +802,9 @@ export function PhotoTraceWorkflow({
     };
   }, [
     cleanup,
-    corrections,
     detailSensitivity,
     edgeCleanupPercent,
     preserveFineDetail,
-    rebuildFromConfirmedRegions,
     polarity,
     open,
     quad,
