@@ -41,7 +41,6 @@ import {
   eraseRasterRegions,
   extractBlackVectorPaths,
   preprocessForTrace,
-  restoreRasterRegions,
   type NormalizedPoint,
   type NormalizedQuad,
   type NormalizedRect,
@@ -534,15 +533,35 @@ function preprocessWithCorrections(
         ).fill(255),
       }
     : preprocessForTrace(corrected, options);
-  const kept = corrections
-    .filter((correction) => correction.kind === 'keep')
-    .map((correction) => correction.rect);
+  const kept = corrections.filter((correction) => correction.kind === 'keep');
   if (kept.length > 0) {
-    const detail = preprocessForTrace(corrected, {
-      ...options,
-      edgeCleanupPercent: 0,
-    });
-    processed = restoreRasterRegions(processed, detail, kept);
+    const output = new Uint8ClampedArray(processed.data);
+    for (const correction of kept) {
+      const left = Math.max(0, Math.floor(correction.rect.x * corrected.width));
+      const top = Math.max(0, Math.floor(correction.rect.y * corrected.height));
+      const right = Math.min(corrected.width, Math.ceil((correction.rect.x + correction.rect.width) * corrected.width));
+      const bottom = Math.min(corrected.height, Math.ceil((correction.rect.y + correction.rect.height) * corrected.height));
+      const width = right - left;
+      const height = bottom - top;
+      if (width < 2 || height < 2) continue;
+      const cropData = new Uint8ClampedArray(width * height * 4);
+      for (let y = 0; y < height; y += 1) {
+        const sourceOffset = ((top + y) * corrected.width + left) * 4;
+        cropData.set(corrected.data.subarray(sourceOffset, sourceOffset + width * 4), y * width * 4);
+      }
+      // Re-estimate the leather/background contrast inside this selected
+      // graphic, so a faint motif can be recovered even when the whole-photo
+      // threshold missed it.
+      const detail = preprocessForTrace({ width, height, data: cropData }, {
+        ...options,
+        edgeCleanupPercent: 0,
+        preserveCanvas: true,
+      });
+      for (let y = 0; y < height; y += 1) {
+        output.set(detail.data.subarray(y * width * 4, (y + 1) * width * 4), ((top + y) * corrected.width + left) * 4);
+      }
+    }
+    processed = { ...processed, data: output };
   }
   return eraseRasterRegions(
     processed,
@@ -582,6 +601,12 @@ export function PhotoTraceWorkflow({
   const [replaceCurrentDesign, setReplaceCurrentDesign] = useState(true);
   const [vector, setVector] = useState<TracedVector | null>(null);
   const [vectorSignature, setVectorSignature] = useState('');
+  const [draftVector, setDraftVector] = useState<{
+    width: number;
+    height: number;
+    paths: string[];
+  } | null>(null);
+  const [draftBusy, setDraftBusy] = useState(false);
   const [inkRatio, setInkRatio] = useState(0);
   const [sourcePixelsPerMillimeter, setSourcePixelsPerMillimeter] = useState<
     number | null
@@ -678,7 +703,8 @@ export function PhotoTraceWorkflow({
       return;
     }
 
-    const timer = window.setTimeout(() => {
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
       const image = sourceImageRef.current;
       const rectifiedCanvas = rectifiedCanvasRef.current;
       const refinementCanvas = refinementCanvasRef.current;
@@ -687,6 +713,8 @@ export function PhotoTraceWorkflow({
         return;
 
       try {
+        setDraftBusy(true);
+        setDraftVector(null);
         const corrected = createRectifiedRaster(
           image,
           source.width,
@@ -707,39 +735,63 @@ export function PhotoTraceWorkflow({
             sizeResult.value.height,
           ),
         );
-        const processed = preprocessWithCorrections(
-          corrected,
-          {
-            detailSensitivity,
-            cleanup,
-            edgeCleanupPercent,
-            preserveCanvas: true,
-            preserveFineDetail,
-            polarity,
-          },
-          corrections,
-          rebuildFromConfirmedRegions,
-        );
-        putRasterOnCanvas(previewCanvas, processed);
+        const candidate = preprocessForTrace(corrected, {
+          detailSensitivity,
+          cleanup,
+          edgeCleanupPercent,
+          preserveCanvas: true,
+          preserveFineDetail,
+          polarity,
+        });
+        putRasterOnCanvas(previewCanvas, candidate);
         let blackPixels = 0;
-        for (let pixel = 0; pixel < processed.data.length; pixel += 4) {
-          if (processed.data[pixel] === 0) blackPixels += 1;
+        for (let pixel = 0; pixel < candidate.data.length; pixel += 4) {
+          if (candidate.data[pixel] === 0) blackPixels += 1;
         }
         setInkRatio(
-          blackPixels / Math.max(1, processed.width * processed.height),
+          blackPixels / Math.max(1, candidate.width * candidate.height),
         );
-        setError('');
+        if (blackPixels > 0) {
+          const { default: imageTracer } = await import('imagetracerjs');
+          const draftSvg = imageTracer.imagedataToSVG(candidate, {
+            pal: [
+              { r: 0, g: 0, b: 0, a: 255 },
+              { r: 255, g: 255, b: 255, a: 255 },
+            ],
+            colorsampling: 0,
+            colorquantcycles: 1,
+            pathomit: 0,
+            ltres: 0.55,
+            qtres: 0.55,
+            rightangleenhance: true,
+            linefilter: false,
+            strokewidth: 0,
+            roundcoords: 2,
+            viewbox: true,
+            desc: false,
+          });
+          if (!cancelled) setDraftVector({
+            width: candidate.width,
+            height: candidate.height,
+            paths: extractBlackVectorPaths(draftSvg),
+          });
+        }
+        if (!cancelled) setError('');
       } catch (previewError) {
-        setSourcePixelsPerMillimeter(null);
-        setError(
+        if (!cancelled) setError(
           previewError instanceof Error
             ? previewError.message
             : '照片拉正失败，请重新调整四角。',
         );
+      } finally {
+        if (!cancelled) setDraftBusy(false);
       }
     }, 120);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [
     cleanup,
     corrections,
@@ -779,6 +831,7 @@ export function PhotoTraceWorkflow({
     if (sourceUrlRef.current) URL.revokeObjectURL(sourceUrlRef.current);
     sourceUrlRef.current = null;
     setVector(null);
+    setDraftVector(null);
     setVectorSignature('');
     setCorrections([]);
     setSelection(null);
@@ -1507,16 +1560,16 @@ export function PhotoTraceWorkflow({
             )}
 
             <div className="border-t pt-4">
-              <p className="font-medium">4. 检查保留下来的图文</p>
+              <p className="font-medium">4. 先看照片自动描绘候选</p>
               <p className="text-sm leading-6 text-muted-foreground">
-                黑白预览保留完整皮牌画布；黑色仅表示待制作的图文，不代表压印颜色。
+                上传后先显示矢量候选，方便核对原来有哪些字和图案。它可能含皮纹、旧缝线或错字，不能直接作为制模稿。
               </p>
             </div>
             <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
-              <p className="text-sm font-medium">图文提取方式</p>
+              <p className="text-sm font-medium">制模稿处理方式</p>
               <label className="flex items-start gap-2 text-sm leading-6">
                 <input type="radio" name="trace-reconstruction-mode" className="mt-1" checked={rebuildFromConfirmedRegions} onChange={() => setRebuildFromConfirmedRegions(true)} />
-                <span>按确认内容重建（推荐）：先清空照片底图，再逐处保留图案、重绘文字</span>
+                <span>按确认内容重建（推荐）：自动候选仍可看，制模稿只保留逐处确认的图案与文字</span>
               </label>
               <label className="flex items-start gap-2 text-sm leading-6">
                 <input type="radio" name="trace-reconstruction-mode" className="mt-1" checked={!rebuildFromConfirmedRegions} onChange={() => setRebuildFromConfirmedRegions(false)} />
@@ -1526,16 +1579,27 @@ export function PhotoTraceWorkflow({
             <div className="rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
               <span className="font-medium">照片只是定位依据，不能代替逐字核对</span>
               <span className="block">
-                推荐模式开始时预览会是白底。请在第5步框选每处要保留的图案和线条，并输入每行准确文字；框内皮纹或旧字仍可能混入，选区应尽量贴合图案。
+                请在第5步框选每处要保留的图案和线条，并输入每行准确文字；框内皮纹或旧字仍可能混入，选区应尽量贴合图案。
               </span>
             </div>
             <div className="grid min-h-44 place-items-center overflow-hidden rounded-xl border bg-white p-2">
               {source ? (
-                <canvas
-                  ref={previewCanvasRef}
-                  aria-label="自动描绘黑白预览"
-                  className="max-h-56 max-w-full object-contain"
-                />
+                <>
+                  <canvas
+                    ref={previewCanvasRef}
+                    aria-label="照片自动描绘候选"
+                    className={draftVector?.paths.length ? 'hidden' : 'max-h-56 max-w-full object-contain'}
+                  />
+                  {draftVector && draftVector.paths.length > 0 && (
+                    <svg aria-label="照片自动描绘的矢量候选，仅供参考" viewBox={`0 0 ${draftVector.width} ${draftVector.height}`} className="max-h-56 max-w-full">
+                      <rect width={draftVector.width} height={draftVector.height} fill="white" />
+                      <g fill="#000" fillRule="evenodd" stroke="none">
+                        {draftVector.paths.map((path, index) => <path key={index} d={path} />)}
+                      </g>
+                    </svg>
+                  )}
+                  {draftBusy && <p className="text-xs text-muted-foreground">正在生成自动矢量候选…</p>}
+                </>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   上传后在这里检查效果
@@ -1621,26 +1685,18 @@ export function PhotoTraceWorkflow({
             </p>
             {source && (
               <p className="text-sm text-muted-foreground">
-                {rebuildFromConfirmedRegions ? '已选照片图案黑色覆盖约' : '整图自动候选黑色覆盖约'}{' '}
-                {(inkRatio * 100).toFixed(1)}%（不是识别准确率；重绘的文字和线条在生成曲线后显示）
+                自动候选黑色覆盖约 {(inkRatio * 100).toFixed(1)}%（不是识别准确率）。
+                {inkRatio < 0.02 && ' 当前只识别出少量线条，请分别试“深色压痕”“浅色压痕”，并检查四角框选。'}
               </p>
             )}
-
-            <Button
-              type="button"
-              className="h-10 w-full"
-              onClick={generateVector}
-              disabled={
-                !source || busy || Boolean(quadError) || !sizeResult.value
-              }
-            >
-              {busy ? (
-                <LoaderCircle className="animate-spin" aria-hidden="true" />
-              ) : (
-                <WandSparkles aria-hidden="true" />
-              )}
-              {busy ? '正在生成曲线…' : '把图文生成矢量曲线'}
-            </Button>
+            {rebuildFromConfirmedRegions && corrections.length === 0 && <div className="rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
+              自动候选已可查看。制模稿尚未加入任何确认内容，请继续到第5步框选图案、重绘文字。
+              <Button type="button" size="sm" variant="outline" className="mt-2" onClick={() => refinementSurfaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>去第5步确认图文</Button>
+            </div>}
+            {!rebuildFromConfirmedRegions && <Button type="button" variant="outline" className="h-10 w-full" onClick={generateVector} disabled={!source || busy || Boolean(quadError) || !sizeResult.value}>
+              <WandSparkles aria-hidden="true" />
+              生成整图参考曲线（不能作制模主文件）
+            </Button>}
 
             {vector && vectorIsCurrent && (
               <div className="space-y-2 rounded-xl border border-emerald-600/25 bg-emerald-500/[0.06] p-3">

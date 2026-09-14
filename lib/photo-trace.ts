@@ -296,6 +296,12 @@ function chooseStructuralMask(
 
   if (darkIsUseful && !lightIsUseful) return dark.mask;
   if (lightIsUseful && !darkIsUseful) return light.mask;
+  // The sparser response is often just the photographed stitch or a pair of
+  // rules. Do not discard a usable lettering candidate for that reason.
+  if (dark.fraction < 0.025 && light.fraction >= 0.025 && light.fraction <= 0.42)
+    return light.mask;
+  if (light.fraction < 0.025 && dark.fraction >= 0.025 && dark.fraction <= 0.42)
+    return dark.mask;
   return dark.fraction <= light.fraction ? dark.mask : light.mask;
 }
 
