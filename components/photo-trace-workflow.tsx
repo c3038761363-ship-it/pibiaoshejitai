@@ -18,7 +18,6 @@ import {
 
 import {
   DimensionInput,
-  FontField,
   RangeField,
 } from '@/components/leather-label-ui';
 import { Button } from '@/components/ui/button';
@@ -33,7 +32,11 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { getFont } from '@/lib/label-options';
+import {
+  confirmedTextCurve,
+  CURVE_FONT_OPTIONS,
+  type CurveFontId,
+} from '@/lib/vector-font';
 import {
   eraseRasterRegions,
   extractBlackVectorPaths,
@@ -72,10 +75,12 @@ type PhotoViewport = {
 
 type CorrectionRegion = {
   id: number;
-  kind: 'erase' | 'text' | 'keep';
+  kind: 'erase' | 'text' | 'keep' | 'line' | 'arrow';
   rect: NormalizedRect;
   text?: string;
   fontId?: string;
+  start?: NormalizedPoint;
+  end?: NormalizedPoint;
 };
 
 const FULL_PHOTO_VIEWPORT: PhotoViewport = {
@@ -469,63 +474,45 @@ function normalizedSelection(
   };
 }
 
-function renderConfirmedText(
-  text: string,
-  fontId: string,
-  widthMm: number,
-  heightMm: number,
-): RasterData {
-  const canvas = document.createElement('canvas');
-  // Sample both axes at one physical scale. Independent minimum dimensions
-  // would stretch narrow or tall lettering when mapped back to the label.
-  const pixelsPerMillimeter = Math.min(48, 1800 / widthMm, 1400 / heightMm);
-  canvas.width = Math.max(1, Math.round(widthMm * pixelsPerMillimeter));
-  canvas.height = Math.max(1, Math.round(heightMm * pixelsPerMillimeter));
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  if (!context) throw new Error('无法生成文字曲线，请检查浏览器的画布功能。');
-  context.fillStyle = '#fff';
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#000';
-  context.textAlign = 'center';
-  context.textBaseline = 'alphabetic';
-  const family = getFont(fontId).stack;
-  let fontSize = Math.max(16, Math.floor(canvas.height * 0.8));
-  context.font = `700 ${fontSize}px ${family}`;
-  let metrics = context.measureText(text);
-  const inkHeight =
-    metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
-  const fit = Math.min(
-    (canvas.width * 0.94) / Math.max(1, metrics.width),
-    (canvas.height * 0.84) / Math.max(1, inkHeight),
-  );
-  fontSize = Math.max(8, Math.floor(fontSize * fit));
-  context.font = `700 ${fontSize}px ${family}`;
-  metrics = context.measureText(text);
-  if (
-    metrics.width > canvas.width * 0.98 ||
-    metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent >
-      canvas.height * 0.98
-  ) {
-    throw new Error(`“${text}”放不进所选范围，请扩大框选或分成两行重绘。`);
-  }
-  const baseline =
-    (canvas.height +
-      metrics.actualBoundingBoxAscent -
-      metrics.actualBoundingBoxDescent) /
-    2;
-  context.fillText(text, canvas.width / 2, baseline);
-  const image = context.getImageData(0, 0, canvas.width, canvas.height);
-  for (let pixel = 0; pixel < image.data.length; pixel += 4) {
-    const value = image.data[pixel] < 176 ? 0 : 255;
-    image.data[pixel] = value;
-    image.data[pixel + 1] = value;
-    image.data[pixel + 2] = value;
-    image.data[pixel + 3] = 255;
-  }
+function geometricLineCurve(
+  start: NormalizedPoint,
+  end: NormalizedPoint,
+  width: number,
+  height: number,
+  pixelsPerMillimeter: number,
+  arrow: boolean,
+): VectorOverlay {
+  const x1 = start.x * width;
+  const y1 = start.y * height;
+  const x2 = end.x * width;
+  const y2 = end.y * height;
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const length = Math.hypot(dx, dy);
+  if (length < pixelsPerMillimeter) throw new Error('直线长度不足1 mm，请重新拖动。');
+  const ux = dx / length;
+  const uy = dy / length;
+  const nx = -uy;
+  const ny = ux;
+  const halfStroke = pixelsPerMillimeter * 0.16;
+  const headLength = arrow ? Math.min(length * 0.28, pixelsPerMillimeter * 2.4) : 0;
+  const headHalfWidth = pixelsPerMillimeter * 0.85;
+  const shaftEndX = x2 - ux * headLength;
+  const shaftEndY = y2 - uy * headLength;
+  const points: [number, number][] = [
+    [x1 + nx * halfStroke, y1 + ny * halfStroke],
+    [shaftEndX + nx * halfStroke, shaftEndY + ny * halfStroke],
+    ...(arrow ? [
+      [shaftEndX + nx * headHalfWidth, shaftEndY + ny * headHalfWidth],
+      [x2, y2],
+      [shaftEndX - nx * headHalfWidth, shaftEndY - ny * headHalfWidth],
+    ] as [number, number][] : []),
+    [shaftEndX - nx * halfStroke, shaftEndY - ny * halfStroke],
+    [x1 - nx * halfStroke, y1 - ny * halfStroke],
+  ];
   return {
-    width: canvas.width,
-    height: canvas.height,
-    data: image.data,
+    paths: [`M${points.map(([x, y]) => `${x.toFixed(3)} ${y.toFixed(3)}`).join('L')}Z`],
+    x: 0, y: 0, scaleX: 1, scaleY: 1,
   };
 }
 
@@ -533,18 +520,27 @@ function preprocessWithCorrections(
   corrected: RasterData,
   options: TracePreprocessOptions,
   corrections: CorrectionRegion[],
+  rebuildFromConfirmedRegions: boolean,
 ) {
-  let processed = preprocessForTrace(corrected, options);
+  // Production reconstruction starts on a blank canvas. Photo pixels enter
+  // only where the user explicitly selected a graphic/line to keep; unread
+  // photographed lettering cannot silently become a mold curve.
+  let processed = rebuildFromConfirmedRegions
+    ? {
+        width: corrected.width,
+        height: corrected.height,
+        data: new Uint8ClampedArray(
+          corrected.width * corrected.height * 4,
+        ).fill(255),
+      }
+    : preprocessForTrace(corrected, options);
   const kept = corrections
     .filter((correction) => correction.kind === 'keep')
     .map((correction) => correction.rect);
   if (kept.length > 0) {
     const detail = preprocessForTrace(corrected, {
       ...options,
-      detailSensitivity: 95,
-      cleanup: 0,
       edgeCleanupPercent: 0,
-      preserveFineDetail: true,
     });
     processed = restoreRasterRegions(processed, detail, kept);
   }
@@ -574,6 +570,8 @@ export function PhotoTraceWorkflow({
   const [cleanup, setCleanup] = useState(4);
   const [edgeCleanupPercent, setEdgeCleanupPercent] = useState(0);
   const [preserveFineDetail, setPreserveFineDetail] = useState(true);
+  const [rebuildFromConfirmedRegions, setRebuildFromConfirmedRegions] =
+    useState(true);
   const [polarity, setPolarity] = useState<'auto' | 'dark' | 'light'>('auto');
   const [targetWidthInput, setTargetWidthInput] = useState(
     formatInputMillimeters(currentWidth),
@@ -595,9 +593,16 @@ export function PhotoTraceWorkflow({
     useState<PhotoViewport>(FULL_PHOTO_VIEWPORT);
   const [corrections, setCorrections] = useState<CorrectionRegion[]>([]);
   const [selection, setSelection] = useState<NormalizedRect | null>(null);
+  const [selectionEndpoints, setSelectionEndpoints] = useState<{
+    start: NormalizedPoint;
+    end: NormalizedPoint;
+  } | null>(null);
   const [correctionText, setCorrectionText] = useState('');
-  const [correctionFontId, setCorrectionFontId] = useState('arial-black');
+  const [correctionTextConfirm, setCorrectionTextConfirm] = useState('');
+  const [correctionFontId, setCorrectionFontId] = useState<CurveFontId>('arvo');
   const [textChecked, setTextChecked] = useState(false);
+  const [textPreviewCurve, setTextPreviewCurve] = useState<VectorOverlay | null>(null);
+  const [textPreviewError, setTextPreviewError] = useState('');
 
   const sourceImageRef = useRef<HTMLImageElement | null>(null);
   const sourceUrlRef = useRef<string | null>(null);
@@ -620,6 +625,7 @@ export function PhotoTraceWorkflow({
     cleanup,
     edgeCleanupPercent,
     preserveFineDetail,
+    rebuildFromConfirmedRegions,
     polarity,
     ...corrections.flatMap((correction) => [
       correction.id,
@@ -630,6 +636,8 @@ export function PhotoTraceWorkflow({
       correction.rect.height,
       correction.text ?? '',
       correction.fontId ?? '',
+      correction.start?.x ?? '', correction.start?.y ?? '',
+      correction.end?.x ?? '', correction.end?.y ?? '',
     ]),
     ...QUAD_CORNERS.flatMap((corner) => [quad[corner].x, quad[corner].y]),
   ].join('|');
@@ -637,6 +645,19 @@ export function PhotoTraceWorkflow({
   latestTraceInputSignatureRef.current = traceInputSignature;
   const vectorIsCurrent =
     Boolean(vector) && vectorSignature === traceInputSignature;
+
+  useEffect(() => {
+    let active = true;
+    setTextPreviewCurve(null);
+    setTextPreviewError('');
+    const text = correctionText.trim();
+    if (text) {
+      confirmedTextCurve(text, correctionFontId, { x: 0, y: 0, width: 600, height: 100 })
+        .then((curve) => { if (active) setTextPreviewCurve(curve); })
+        .catch((error) => { if (active) setTextPreviewError(error instanceof Error ? error.message : '字体预览失败。'); });
+    }
+    return () => { active = false; };
+  }, [correctionText, correctionFontId]);
 
   useEffect(() => {
     return () => {
@@ -697,6 +718,7 @@ export function PhotoTraceWorkflow({
             polarity,
           },
           corrections,
+          rebuildFromConfirmedRegions,
         );
         putRasterOnCanvas(previewCanvas, processed);
         let blackPixels = 0;
@@ -724,6 +746,7 @@ export function PhotoTraceWorkflow({
     detailSensitivity,
     edgeCleanupPercent,
     preserveFineDetail,
+    rebuildFromConfirmedRegions,
     polarity,
     open,
     quad,
@@ -911,6 +934,7 @@ export function PhotoTraceWorkflow({
     const point = refinementPoint(event);
     if (!point) return;
     refinementDragRef.current = point;
+    setSelectionEndpoints({ start: point, end: point });
     setTextChecked(false);
     setSelection(normalizedSelection(point, point));
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -919,7 +943,10 @@ export function PhotoTraceWorkflow({
   function moveRefinementSelection(event: ReactPointerEvent<HTMLDivElement>) {
     const start = refinementDragRef.current;
     const point = refinementPoint(event);
-    if (start && point) setSelection(normalizedSelection(start, point));
+    if (start && point) {
+      setSelection(normalizedSelection(start, point));
+      setSelectionEndpoints({ start, end: point });
+    }
   }
 
   function endRefinementSelection(event: ReactPointerEvent<HTMLDivElement>) {
@@ -935,14 +962,26 @@ export function PhotoTraceWorkflow({
       setError('最多添加30处局部修正，请先删除不需要的区域。');
       return;
     }
-    if (
+    const geometric = kind === 'line' || kind === 'arrow';
+    if (geometric && (!selectionEndpoints || Math.hypot(
+      (selectionEndpoints.end.x - selectionEndpoints.start.x) * sizeResult.value.width,
+      (selectionEndpoints.end.y - selectionEndpoints.start.y) * sizeResult.value.height,
+    ) < 1)) {
+      setError('请沿线条或箭头从起点拖到终点，长度至少1 mm。');
+      return;
+    }
+    if (!geometric && (
       selection.width * sizeResult.value.width < 0.5 ||
       selection.height * sizeResult.value.height < 0.5
-    ) {
+    )) {
       setError('选取区域太小，请重新拖出完整的文字或杂纹范围。');
       return;
     }
     const exactText = correctionText.trim();
+    if (kind === 'text' && exactText !== correctionTextConfirm.trim()) {
+      setError('两次输入的文字不一致，请对照客户资料逐字检查。');
+      return;
+    }
     if (kind === 'text' && (!exactText || !textChecked)) {
       setError('请填写客户确认的准确文字，并勾选“已逐字核对”。');
       return;
@@ -952,15 +991,27 @@ export function PhotoTraceWorkflow({
       {
         id: nextCorrectionIdRef.current++,
         kind,
-        rect: selection,
+        rect: geometric
+          ? {
+              x: Math.max(0, selection.x - 0.6 / sizeResult.value.width),
+              y: Math.max(0, selection.y - 0.6 / sizeResult.value.height),
+              width: Math.min(1, selection.x + selection.width + 0.6 / sizeResult.value.width) - Math.max(0, selection.x - 0.6 / sizeResult.value.width),
+              height: Math.min(1, selection.y + selection.height + 0.6 / sizeResult.value.height) - Math.max(0, selection.y - 0.6 / sizeResult.value.height),
+            }
+          : selection,
         ...(kind === 'text'
           ? { text: exactText, fontId: correctionFontId }
           : {}),
+        ...(geometric && selectionEndpoints ? selectionEndpoints : {}),
       },
     ]);
     setSelection(null);
+    setSelectionEndpoints(null);
     setTextChecked(false);
-    if (kind === 'text') setCorrectionText('');
+    if (kind === 'text') {
+      setCorrectionText('');
+      setCorrectionTextConfirm('');
+    }
     setError('');
   }
 
@@ -1002,6 +1053,7 @@ export function PhotoTraceWorkflow({
           polarity,
         },
         corrections,
+        rebuildFromConfirmedRegions,
       );
       let formalBlackPixels = 0;
       for (let pixel = 0; pixel < processed.data.length; pixel += 4) {
@@ -1011,10 +1063,10 @@ export function PhotoTraceWorkflow({
         formalBlackPixels / Math.max(1, processed.width * processed.height);
       if (
         formalInkRatio < 0.001 &&
-        !corrections.some((correction) => correction.kind === 'text')
+        !corrections.some((correction) => ['text', 'line', 'arrow'].includes(correction.kind))
       ) {
         throw new Error(
-          '当前没有留下可描绘的图文，请提高“图文完整度”，或降低“去边框范围”。',
+          '当前没有确认的图文，请在第5步选择要保留的图案，或逐行重绘文字、线条。',
         );
       }
       if (formalInkRatio > 0.88) {
@@ -1045,51 +1097,28 @@ export function PhotoTraceWorkflow({
       const paths = extractBlackVectorPaths(tracedSvg);
       const overlays: VectorOverlay[] = [];
       for (const correction of corrections) {
+        if ((correction.kind === 'line' || correction.kind === 'arrow') && correction.start && correction.end) {
+          overlays.push(geometricLineCurve(
+            correction.start, correction.end,
+            processed.width, processed.height,
+            Math.min(processed.width / sizeResult.value.width, processed.height / sizeResult.value.height),
+            correction.kind === 'arrow',
+          ));
+          continue;
+        }
         if (correction.kind !== 'text' || !correction.text) continue;
-        const textRaster = renderConfirmedText(
-          correction.text,
-          correction.fontId ?? 'arial-black',
-          correction.rect.width * sizeResult.value.width,
-          correction.rect.height * sizeResult.value.height,
-        );
-        const textSvg = imageTracer.imagedataToSVG(textRaster, {
-          pal: [
-            { r: 0, g: 0, b: 0, a: 255 },
-            { r: 255, g: 255, b: 255, a: 255 },
-          ],
-          colorsampling: 0,
-          colorquantcycles: 1,
-          pathomit: 0,
-          ltres: 0.25,
-          qtres: 0.25,
-          rightangleenhance: true,
-          linefilter: false,
-          roundcoords: 3,
-          viewbox: true,
-          desc: false,
-        });
-        const textPaths = extractBlackVectorPaths(textSvg);
-        if (textPaths.length === 0)
-          throw new Error(
-            `“${correction.text}”没有生成可用字形，请换一种字体。`,
-          );
         const targetWidth = correction.rect.width * processed.width;
         const targetHeight = correction.rect.height * processed.height;
-        const uniformScale = Math.min(
-          targetWidth / textRaster.width,
-          targetHeight / textRaster.height,
-        );
-        overlays.push({
-          paths: textPaths,
-          x:
-            correction.rect.x * processed.width +
-            (targetWidth - textRaster.width * uniformScale) / 2,
-          y:
-            correction.rect.y * processed.height +
-            (targetHeight - textRaster.height * uniformScale) / 2,
-          scaleX: uniformScale,
-          scaleY: uniformScale,
-        });
+        overlays.push(await confirmedTextCurve(
+          correction.text,
+          (correction.fontId ?? 'arvo') as CurveFontId,
+          {
+            x: correction.rect.x * processed.width,
+            y: correction.rect.y * processed.height,
+            width: targetWidth,
+            height: targetHeight,
+          },
+        ));
       }
       const pathCharacters = [
         ...paths,
@@ -1119,10 +1148,11 @@ export function PhotoTraceWorkflow({
           sizeResult.value.width,
           sizeResult.value.height,
         ),
-        manualTextCount: overlays.length,
+        manualTextCount: corrections.filter((correction) => correction.kind === 'text').length,
         excludedRegionCount: corrections.filter(
           (correction) => correction.kind !== 'keep',
         ).length,
+        reconstructedFromConfirmedRegions: rebuildFromConfirmedRegions,
       });
       setVectorSignature(generationSignature);
     } catch (traceError) {
@@ -1479,15 +1509,24 @@ export function PhotoTraceWorkflow({
             <div className="border-t pt-4">
               <p className="font-medium">4. 检查保留下来的图文</p>
               <p className="text-sm leading-6 text-muted-foreground">
-                黑白预览保留完整皮牌画布；黑色是当前识别候选区域，不代表压印颜色，须检查皮纹、缝线和边框有没有误入。
+                黑白预览保留完整皮牌画布；黑色仅表示待制作的图文，不代表压印颜色。
               </p>
             </div>
+            <div className="space-y-2 rounded-xl border bg-muted/30 p-3">
+              <p className="text-sm font-medium">图文提取方式</p>
+              <label className="flex items-start gap-2 text-sm leading-6">
+                <input type="radio" name="trace-reconstruction-mode" className="mt-1" checked={rebuildFromConfirmedRegions} onChange={() => setRebuildFromConfirmedRegions(true)} />
+                <span>按确认内容重建（推荐）：先清空照片底图，再逐处保留图案、重绘文字</span>
+              </label>
+              <label className="flex items-start gap-2 text-sm leading-6">
+                <input type="radio" name="trace-reconstruction-mode" className="mt-1" checked={!rebuildFromConfirmedRegions} onChange={() => setRebuildFromConfirmedRegions(false)} />
+                <span>整张照片自动描边（仅参考）：可能混入皮纹、旧缝线与错字</span>
+              </label>
+            </div>
             <div className="rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
-              <span className="font-medium">
-                自动识别仍是候选，须对照客户原稿
-              </span>
+              <span className="font-medium">照片只是定位依据，不能代替逐字核对</span>
               <span className="block">
-                模糊小字、皮纹和旧缝线仍可能描错。可在下方局部排除、加强细线或逐字重绘；导出纯图文前还须逐字、逐线核对。
+                推荐模式开始时预览会是白底。请在第5步框选每处要保留的图案和线条，并输入每行准确文字；框内皮纹或旧字仍可能混入，选区应尽量贴合图案。
               </span>
             </div>
             <div className="grid min-h-44 place-items-center overflow-hidden rounded-xl border bg-white p-2">
@@ -1582,8 +1621,8 @@ export function PhotoTraceWorkflow({
             </p>
             {source && (
               <p className="text-sm text-muted-foreground">
-                当前自动候选黑色覆盖约 {(inkRatio * 100).toFixed(1)}%
-                （不是识别准确率；手动重绘文字在生成曲线后显示）
+                {rebuildFromConfirmedRegions ? '已选照片图案黑色覆盖约' : '整图自动候选黑色覆盖约'}{' '}
+                {(inkRatio * 100).toFixed(1)}%（不是识别准确率；重绘的文字和线条在生成曲线后显示）
               </p>
             )}
 
@@ -1629,6 +1668,7 @@ export function PhotoTraceWorkflow({
                       {vector.overlays?.map((overlay, overlayIndex) => (
                         <g
                           key={`confirmed-text-${overlayIndex}`}
+                          fillRule="nonzero"
                           transform={`translate(${overlay.x} ${overlay.y}) scale(${overlay.scaleX} ${overlay.scaleY})`}
                         >
                           {overlay.paths.map((path, pathIndex) => (
@@ -1666,7 +1706,7 @@ export function PhotoTraceWorkflow({
             <div>
               <p className="font-medium">5. 局部去杂纹与逐字重绘</p>
               <p className="text-sm leading-6 text-muted-foreground">
-                在拉正照片上拖出一块区域：可加强保留浅色细线、排除皮纹或旧缝线，也可输入客户确认的文字重新生成清晰曲线。每次选一行文字。
+                在拉正照片上拖出一块区域：保留需要的图案和线条，或对照客户资料输入准确文字。每次选一行文字。推荐模式只输出这些明确选取的内容。
               </p>
             </div>
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,.8fr)]">
@@ -1736,8 +1776,13 @@ export function PhotoTraceWorkflow({
                   disabled={!selection}
                   onClick={() => addCorrection('keep')}
                 >
-                  加强保留这处细线/图案
+                  保留这处图案/细线
                 </Button>
+                <div className="flex flex-wrap gap-2 rounded-lg border bg-white p-2">
+                  <p className="w-full text-xs leading-5 text-muted-foreground">线条或箭头请从起点拖到终点，再点下面按钮；会重建为笔直的约0.32 mm曲线，不使用照片毛边。</p>
+                  <Button type="button" variant="outline" size="sm" disabled={!selectionEndpoints} onClick={() => addCorrection('line')}>重画直线</Button>
+                  <Button type="button" variant="outline" size="sm" disabled={!selectionEndpoints} onClick={() => addCorrection('arrow')}>重画箭头</Button>
+                </div>
                 <div className="border-t pt-3">
                   <label
                     htmlFor="trace-corrected-text"
@@ -1756,29 +1801,30 @@ export function PhotoTraceWorkflow({
                     }}
                   />
                 </div>
-                <FontField
-                  id="trace-corrected-font"
-                  label="重绘字体"
-                  value={correctionFontId}
-                  onChange={(value) => {
-                    setCorrectionFontId(value);
-                    setTextChecked(false);
-                  }}
-                />
+                <div className="space-y-2">
+                  <label htmlFor="trace-corrected-font" className="block text-sm font-medium">重绘字体（实际曲线文件）</label>
+                  <select id="trace-corrected-font" className="h-10 w-full rounded-md border bg-white px-3 text-sm" value={correctionFontId} onChange={(event) => { setCorrectionFontId(event.target.value as CurveFontId); setTextChecked(false); }}>
+                    {CURVE_FONT_OPTIONS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label htmlFor="trace-corrected-text-confirm" className="block text-sm font-medium">再次输入准确文字</label>
+                  <Input id="trace-corrected-text-confirm" value={correctionTextConfirm} maxLength={80} placeholder="请对照客户资料再输入一次" onChange={(event) => { setCorrectionTextConfirm(event.target.value); setTextChecked(false); }} />
+                  {correctionTextConfirm && correctionText.trim() !== correctionTextConfirm.trim() && <p className="text-xs text-destructive">两次输入不同，请逐字核对。</p>}
+                </div>
                 {correctionText.trim() && (
                   <div className="space-y-2 rounded-lg border bg-white p-3">
                     <p className="text-xs text-muted-foreground">
                       本次实际文字放大预览（请核对每个字母、数字及笔画）
                     </p>
-                    <p
-                      className="overflow-x-auto whitespace-nowrap text-3xl font-bold text-black"
-                      style={{ fontFamily: getFont(correctionFontId).stack }}
-                    >
-                      {correctionText.trim()}
-                    </p>
+                    {textPreviewCurve && <svg viewBox="0 0 600 100" className="h-20 w-full bg-white" role="img" aria-label={`曲线字形预览：${correctionText.trim()}`}>
+                      <g fill="#000" fillRule="nonzero" transform={`translate(${textPreviewCurve.x} ${textPreviewCurve.y}) scale(${textPreviewCurve.scaleX} ${textPreviewCurve.scaleY})`}>
+                        {textPreviewCurve.paths.map((path, index) => <path key={index} d={path} />)}
+                      </g>
+                    </svg>}
+                    {textPreviewError && <p className="text-xs text-destructive">{textPreviewError}</p>}
                     <p className="text-xs leading-5 text-amber-900">
-                      若电脑没有所选字体，浏览器可能改用替代字体；请以最终
-                      SVG/CDR 中的字形为准，必要时在 CDR 中人工重画。
+                      预览与曲线由同一份授权字体文件生成；缺少字形会阻止生成，不会偷偷换字。特殊品牌字体仍需在 CDR 中人工核对或描字。
                     </p>
                   </div>
                 )}
@@ -1795,7 +1841,7 @@ export function PhotoTraceWorkflow({
                   type="button"
                   size="sm"
                   disabled={
-                    !selection || !correctionText.trim() || !textChecked
+                    !selection || !correctionText.trim() || correctionText.trim() !== correctionTextConfirm.trim() || !textPreviewCurve || !textChecked
                   }
                   onClick={() => addCorrection('text')}
                 >
@@ -1818,7 +1864,11 @@ export function PhotoTraceWorkflow({
                       {correction.kind === 'text'
                         ? `清晰文字：${correction.text}`
                         : correction.kind === 'keep'
-                          ? '加强保留细线/图案'
+                          ? '保留图案/细线'
+                          : correction.kind === 'line'
+                            ? '几何直线'
+                            : correction.kind === 'arrow'
+                              ? '几何箭头'
                           : '排除杂纹/旧边框'}
                     </span>
                     <Button

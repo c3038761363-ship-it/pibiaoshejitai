@@ -74,7 +74,7 @@ function tracedVectorPathsMarkup(vector: TracedVector) {
     .map(
       (
         overlay,
-      ) => `<g transform="translate(${formatMm(overlay.x)} ${formatMm(overlay.y)}) scale(${formatScale(overlay.scaleX)} ${formatScale(overlay.scaleY)})">
+      ) => `<g fill-rule="nonzero" transform="translate(${formatMm(overlay.x)} ${formatMm(overlay.y)}) scale(${formatScale(overlay.scaleX)} ${formatScale(overlay.scaleY)})">
       ${overlay.paths
         .map((path) => `<path d="${escapeXml(path)}" />`)
         .join('\n      ')}

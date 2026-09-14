@@ -182,6 +182,7 @@ export default function Home() {
   const [uploadError, setUploadError] = useState('');
   const [exported, setExported] = useState(false);
   const [photoArtworkReviewed, setPhotoArtworkReviewed] = useState(false);
+  const [showProductionArtwork, setShowProductionArtwork] = useState(true);
 
   const customSizeResult = useMemo(
     () => validateCustomSize(customWidthInput, customHeightInput),
@@ -215,6 +216,7 @@ export default function Home() {
   const purePhotoArtworkReady = Boolean(
     isLabelCoordinateAsset &&
     asset?.vector &&
+    asset.vector.reconstructedFromConfirmedRegions === true &&
     !labelCoordinateSizeMismatch &&
     !customSizeError &&
     !hasAdditionalDesignObjects &&
@@ -905,9 +907,16 @@ export default function Home() {
               <span>{labelType}</span>
             </div>
           </div>
+          {isLabelCoordinateAsset && (
+            <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-white">
+              <button type="button" className={`rounded-lg border px-3 py-2 ${showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`} onClick={() => setShowProductionArtwork(true)}>{asset?.vector?.reconstructedFromConfirmedRegions ? '纯图文制模预览' : '整图描边参考预览'}</button>
+              <button type="button" className={`rounded-lg border px-3 py-2 ${!showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`} onClick={() => setShowProductionArtwork(false)}>皮牌成品示意</button>
+              <span className="text-white/65">{asset?.vector?.reconstructedFromConfirmedRegions ? '制模预览' : '参考预览'}只显示黑色曲线，不显示皮色和示意缝线。</span>
+            </div>
+          )}
           <div className="preview-stage">
             <div className="ruler-note ruler-note-top">
-              顶部虚线中心距边3 mm
+              {isLabelCoordinateAsset && showProductionArtwork ? '纯图文制作坐标' : '顶部虚线中心距边3 mm'}
             </div>
             <div
               className="label-frame"
@@ -925,9 +934,9 @@ export default function Home() {
                   y="0"
                   width={size.width}
                   height={size.height}
-                  fill={leatherColor}
+                  fill={isLabelCoordinateAsset && showProductionArtwork ? '#ffffff' : leatherColor}
                 />
-                <line
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && <line
                   x1={effectiveStitchInset}
                   x2={size.width - effectiveStitchInset}
                   y1="3"
@@ -935,8 +944,8 @@ export default function Home() {
                   stroke="#000000"
                   strokeWidth="0.45"
                   strokeDasharray={`${dashLength} ${dashGap}`}
-                />
-                <line
+                />}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && <line
                   x1={effectiveStitchInset}
                   x2={size.width - effectiveStitchInset}
                   y1={size.height - 3}
@@ -944,7 +953,7 @@ export default function Home() {
                   stroke="#000000"
                   strokeWidth="0.45"
                   strokeDasharray={`${dashLength} ${dashGap}`}
-                />
+                />}
                 {asset?.kind === 'traced-vector' && asset.vector && (
                   <svg
                     x={effectiveAssetX}
@@ -957,13 +966,14 @@ export default function Home() {
                     }
                     overflow="visible"
                   >
-                    <g fill={stampColor} fillRule="evenodd" stroke="none">
+                    <g fill={isLabelCoordinateAsset && showProductionArtwork ? '#000000' : stampColor} fillRule="evenodd" stroke="none">
                       {asset.vector.paths.map((path, index) => (
                         <path key={`${path.slice(0, 24)}-${index}`} d={path} />
                       ))}
                       {asset.vector.overlays?.map((overlay, overlayIndex) => (
                         <g
                           key={`confirmed-text-${overlayIndex}`}
+                          fillRule="nonzero"
                           transform={`translate(${overlay.x} ${overlay.y}) scale(${overlay.scaleX} ${overlay.scaleY})`}
                         >
                           {overlay.paths.map((path, pathIndex) => (
@@ -984,7 +994,7 @@ export default function Home() {
                     preserveAspectRatio="xMidYMid meet"
                   />
                 )}
-                {markShape !== 'none' && (
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && markShape !== 'none' && (
                   <VectorMarkPreview
                     x={layout.markX}
                     y={layout.markY}
@@ -995,7 +1005,7 @@ export default function Home() {
                     fontFamily={mainFontOption.stack}
                   />
                 )}
-                {mainText && (
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && mainText && (
                   <text
                     x={layout.textX}
                     y={layout.textY}
@@ -1010,7 +1020,7 @@ export default function Home() {
                     {mainText}
                   </text>
                 )}
-                {subText && (
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && subText && (
                   <text
                     x={layout.textX}
                     y={layout.textY + fontSize * 0.72}
@@ -1033,7 +1043,7 @@ export default function Home() {
               <span>{formatMm(size.height)} mm</span>
             </div>
             <div className="ruler-note ruler-note-bottom">
-              底部虚线中心距边3 mm
+              {isLabelCoordinateAsset && showProductionArtwork ? '图文仅供复核，制模前在CDR逐处检查' : '底部虚线中心距边3 mm'}
             </div>
           </div>
           {contentWarning && (
@@ -1316,38 +1326,29 @@ export default function Home() {
                   aria-hidden="true"
                 />
                 <p className="text-sm leading-6 text-muted-foreground">
-                  字体由当前电脑读取。请在安装了所选字体的同一台电脑运行CDR助手；助手导入SVG后立即把文字转曲，生成的CDR便不再依赖字体文件。
+                  {isLabelCoordinateAsset
+                    ? '照片复刻中逐字确认的文字已直接成为曲线，CDR端无需安装这些字体；请仍在CDR核对字形和大小。'
+                    : '字体由当前电脑读取。请在安装了所选字体的同一台电脑运行CDR助手；助手导入SVG后立即把文字转曲，生成的CDR便不再依赖字体文件。'}
                 </p>
               </div>
             </div>
-            <Button
+            {!isLabelCoordinateAsset && <Button
               type="button"
               size="lg"
               className="h-11 w-full"
               onClick={downloadSvg}
-              disabled={Boolean(
-                customSizeError ||
-                contentWarning ||
-                labelCoordinateSizeMismatch,
-              )}
+              disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}
             >
-              {exported ? (
-                <Check aria-hidden="true" />
-              ) : (
-                <Download aria-hidden="true" />
-              )}
-              {exported
-                ? '矢量稿已下载'
-                : isLabelCoordinateAsset
-                  ? '下载完整皮牌示意稿（含皮色/缝线）'
-                  : '下载CorelDRAW矢量稿'}
-            </Button>
+              {exported ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}
+              {exported ? '矢量稿已下载' : '下载CorelDRAW矢量稿'}
+            </Button>}
             {isLabelCoordinateAsset && asset?.vector && (
               <div className="space-y-3 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
-                <p className="font-medium">单独保存纯图文曲线</p>
+                <p className="font-medium">制模主文件：纯图文曲线</p>
                 <p>
-                  此文件结构上仅有曲线路径，保留成品毫米画布，不额外加入皮色、照片或示意缝线；但自动描绘可能误取旧缝线、皮纹，模糊字也可能出错。须逐处核对，不能仅凭曲线生成就发给模具厂。
+                  只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。已确认文字由字体轮廓直接生成；照片保留的图案仍需逐处检查。
                 </p>
+                {!asset.vector.reconstructedFromConfirmedRegions && <p>当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。</p>}
                 {(asset.vector.sourcePixelsPerMillimeter ?? 0) < 8 && (
                   <p>
                     当前照片约{' '}
@@ -1376,16 +1377,20 @@ export default function Home() {
                 </label>
                 <Button
                   type="button"
-                  variant="outline"
+                  size="lg"
                   className="w-full"
                   onClick={downloadPurePhotoArtwork}
                   disabled={!purePhotoArtworkReady}
                 >
                   <Download aria-hidden="true" />
-                  下载纯图文曲线（待CDR复核）
+                  下载纯图文曲线（制模前CDR复核）
                 </Button>
               </div>
             )}
+            {isLabelCoordinateAsset && <Button type="button" variant="outline" className="w-full" onClick={downloadSvg} disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}>
+              <Download aria-hidden="true" />
+              另存完整皮牌示意稿（非制模文件）
+            </Button>}
             <a className="cdr-helper-link" href="/ArtworkToCDR.vbs" download>
               下载新版CDR保存助手
             </a>

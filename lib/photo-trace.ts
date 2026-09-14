@@ -42,6 +42,7 @@ export type TracedVector = {
   sourcePixelsPerMillimeter?: number;
   manualTextCount?: number;
   excludedRegionCount?: number;
+  reconstructedFromConfirmedRegions?: boolean;
 };
 
 export type TracePreprocessOptions = {
