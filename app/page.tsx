@@ -181,7 +181,9 @@ export default function Home() {
   const [assetYPercent, setAssetYPercent] = useState(27);
   const [uploadError, setUploadError] = useState('');
   const [exported, setExported] = useState(false);
-  const [photoArtworkReviewed, setPhotoArtworkReviewed] = useState(false);
+  const [reviewedPhotoArtifactId, setReviewedPhotoArtifactId] = useState<
+    string | null
+  >(null);
   const [showProductionArtwork, setShowProductionArtwork] = useState(true);
 
   const customSizeResult = useMemo(
@@ -213,6 +215,9 @@ export default function Home() {
   const hasAdditionalDesignObjects = Boolean(
     mainText.trim() || subText.trim() || markShape !== 'none',
   );
+  const photoArtifactId = asset?.vector?.traceVersionId ?? null;
+  const photoProductionBlockers = asset?.vector?.productionBlockedReasons ?? [];
+  const photoQualityWarnings = asset?.vector?.qualityWarnings ?? [];
   const purePhotoArtworkReady = Boolean(
     isLabelCoordinateAsset &&
     asset?.vector &&
@@ -220,7 +225,11 @@ export default function Home() {
     !labelCoordinateSizeMismatch &&
     !customSizeError &&
     !hasAdditionalDesignObjects &&
-    photoArtworkReviewed,
+    photoProductionBlockers.length === 0 &&
+    photoQualityWarnings.length === 0 &&
+    asset.vector.expectedTextRegionCount === asset.vector.manualTextCount &&
+    photoArtifactId &&
+    reviewedPhotoArtifactId === photoArtifactId,
   );
   const maxAssetWidth = Math.max(6, size.width - 8);
   const effectiveAssetWidth = isLabelCoordinateAsset
@@ -598,7 +607,7 @@ export default function Home() {
   }
 
   function handlePhotoTraceApply(result: PhotoTraceApplyResult) {
-    setPhotoArtworkReviewed(false);
+    setReviewedPhotoArtifactId(null);
     const targetWidth = Number(result.targetWidth.toFixed(1));
     const targetHeight = Number(result.targetHeight.toFixed(1));
     const vectorRatio =
@@ -628,7 +637,7 @@ export default function Home() {
   }
 
   function handleAssetUpload(event: ChangeEvent<HTMLInputElement>) {
-    setPhotoArtworkReviewed(false);
+    setReviewedPhotoArtifactId(null);
     const file = event.target.files?.[0];
     setUploadError('');
     if (!file) return;
@@ -678,7 +687,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm.svg`;
+    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm_${isLabelCoordinateAsset ? '完整示意图_禁止制模' : '排版工作稿_CDR人工复核'}.svg`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -699,7 +708,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm_纯图文待复核.svg`;
+    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm_纯图文制模稿_CDR待复核.svg`;
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
@@ -1340,15 +1349,21 @@ export default function Home() {
               disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}
             >
               {exported ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}
-              {exported ? '矢量稿已下载' : '下载CorelDRAW矢量稿'}
+              {exported ? '排版工作稿已下载' : '下载排版工作稿（CDR人工复核）'}
             </Button>}
             {isLabelCoordinateAsset && asset?.vector && (
               <div className="space-y-3 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
-                <p className="font-medium">制模主文件：纯图文曲线</p>
+                <p className="font-medium">CDR复核主文件：纯黑图文曲线</p>
                 <p>
                   只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。已确认文字由字体轮廓直接生成；照片保留的图案仍需逐处检查。
                 </p>
                 {!asset.vector.reconstructedFromConfirmedRegions && <p>当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。</p>}
+                {photoProductionBlockers.map((reason) => (
+                  <p key={reason} className="font-medium text-destructive">下载已锁定：{reason}</p>
+                ))}
+                {photoQualityWarnings.map((warning) => (
+                  <p key={warning} className="font-medium">曲线检查未通过：{warning}</p>
+                ))}
                 {(asset.vector.sourcePixelsPerMillimeter ?? 0) < 8 && (
                   <p>
                     当前照片约{' '}
@@ -1366,9 +1381,14 @@ export default function Home() {
                   <input
                     type="checkbox"
                     className="mt-1 size-4 accent-[var(--primary)]"
-                    checked={photoArtworkReviewed}
+                    checked={Boolean(
+                      photoArtifactId &&
+                        reviewedPhotoArtifactId === photoArtifactId,
+                    )}
                     onChange={(event) =>
-                      setPhotoArtworkReviewed(event.target.checked)
+                      setReviewedPhotoArtifactId(
+                        event.target.checked ? photoArtifactId : null,
+                      )
                     }
                   />
                   <span>
@@ -1383,31 +1403,34 @@ export default function Home() {
                   disabled={!purePhotoArtworkReady}
                 >
                   <Download aria-hidden="true" />
-                  下载纯图文曲线（制模前CDR复核）
+                  下载纯图文制模稿（CDR待复核）
                 </Button>
+                <a className="cdr-helper-link" href="/ArtworkToCDR.vbs" download="皮牌纯图文制模_CDR助手_v2.vbs">
+                  下载纯图文专用 CDR 助手 v2
+                </a>
+                <p className="text-xs leading-5">
+                  助手只接受带生产标记的纯黑曲线文件；完整示意图、位图、活字、彩色对象或缝线都会被拒绝。
+                </p>
               </div>
             )}
             {isLabelCoordinateAsset && <Button type="button" variant="outline" className="w-full" onClick={downloadSvg} disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}>
               <Download aria-hidden="true" />
-              另存完整皮牌示意稿（非制模文件）
+              另存完整皮牌示意图（禁止制模）
             </Button>}
-            <a className="cdr-helper-link" href="/ArtworkToCDR.vbs" download>
-              下载新版CDR保存助手
-            </a>
             {isLabelCoordinateAsset && (
               <p className="text-xs leading-5 text-muted-foreground">
-                纯图文文件请用上面的新版助手；以前下载的旧助手会按图案外接框重设页面，不适用于纯图文稿。新版助手若无法核对页面毫米尺寸，会停止保存而不生成错误CDR。
+                请删除以前下载的旧助手。旧版可能按图案外接框改变页面尺寸；v2 若不能确认纯稿标记和毫米尺寸，会直接停止，不生成错误CDR。
               </p>
             )}
             <ol className="space-y-2 text-sm leading-6 text-muted-foreground">
               <li>
-                <StepNumber>1</StepNumber>下载矢量稿和保存助手。
+                <StepNumber>1</StepNumber>{isLabelCoordinateAsset ? '下载纯图文稿和v2助手。' : '下载排版工作稿。'}
               </li>
               <li>
-                <StepNumber>2</StepNumber>把SVG文件拖到助手文件上。
+                <StepNumber>2</StepNumber>{isLabelCoordinateAsset ? '把带“纯图文制模稿”的SVG拖到v2助手上。' : '在CorelDRAW中打开SVG并逐项检查。'}
               </li>
               <li>
-                <StepNumber>3</StepNumber>同一文件夹自动生成真实CDR。
+                <StepNumber>3</StepNumber>{isLabelCoordinateAsset ? '同一文件夹生成“CDR待人工复核”文件。' : '文字转曲、确认尺寸后保存为CDR。'}
               </li>
             </ol>
             <div className="space-y-2 border-t pt-4">

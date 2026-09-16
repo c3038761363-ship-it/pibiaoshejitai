@@ -41,6 +41,12 @@ export type TracedVector = {
   overlays?: VectorOverlay[];
   sourcePixelsPerMillimeter?: number;
   manualTextCount?: number;
+  expectedTextRegionCount?: number;
+  tracedGraphicRegionCount?: number;
+  geometricRegionCount?: number;
+  traceVersionId?: string;
+  productionBlockedReasons?: string[];
+  qualityWarnings?: string[];
   excludedRegionCount?: number;
   reconstructedFromConfirmedRegions?: boolean;
 };
@@ -52,6 +58,9 @@ export type TracePreprocessOptions = {
   preserveCanvas?: boolean;
   preserveFineDetail?: boolean;
   polarity?: 'auto' | 'dark' | 'light';
+  pixelsPerMillimeter?: number;
+  minimumFeatureMm?: number;
+  fillSmallHoles?: boolean;
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -407,6 +416,63 @@ function removeSmallBlackAreas(
   return mask;
 }
 
+function fillSmallWhiteHoles(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  maximumArea: number,
+) {
+  if (maximumArea < 1) return mask;
+
+  const visited = new Uint8Array(mask.length);
+  const queue = new Int32Array(mask.length);
+  const component = new Int32Array(mask.length);
+
+  for (let start = 0; start < mask.length; start += 1) {
+    if (mask[start] === 1 || visited[start] === 1) continue;
+
+    let queueStart = 0;
+    let queueEnd = 1;
+    let componentSize = 0;
+    let touchesEdge = false;
+    queue[0] = start;
+    visited[start] = 1;
+
+    while (queueStart < queueEnd) {
+      const current = queue[queueStart];
+      queueStart += 1;
+      component[componentSize] = current;
+      componentSize += 1;
+
+      const x = current % width;
+      const y = Math.floor(current / width);
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+        touchesEdge = true;
+      }
+      const neighbours = [current - 1, current + 1, current - width, current + width];
+      for (const next of neighbours) {
+        if (next < 0 || next >= mask.length) continue;
+        const nextX = next % width;
+        const nextY = Math.floor(next / width);
+        if (Math.abs(nextX - x) + Math.abs(nextY - y) !== 1) continue;
+        if (mask[next] === 0 && visited[next] === 0) {
+          visited[next] = 1;
+          queue[queueEnd] = next;
+          queueEnd += 1;
+        }
+      }
+    }
+
+    if (!touchesEdge && componentSize <= maximumArea) {
+      for (let index = 0; index < componentSize; index += 1) {
+        mask[component[index]] = 1;
+      }
+    }
+  }
+
+  return mask;
+}
+
 function removeEdgeConnectedBlackAreas(
   mask: Uint8Array,
   width: number,
@@ -722,16 +788,27 @@ export function preprocessForTrace(
     options.edgeCleanupPercent,
   );
   if (!preserveFineDetail) mask = closeSinglePixelGaps(mask, width, height);
+  const physicalFeaturePixels =
+    (options.minimumFeatureMm ?? 0) * (options.pixelsPerMillimeter ?? 0);
+  const physicalFeatureArea = Math.max(
+    0,
+    Math.round(Math.PI * (physicalFeaturePixels / 2) ** 2),
+  );
   removeSmallBlackAreas(
     mask,
     width,
     height,
-    preserveFineDetail
+    physicalFeatureArea > 0 && !preserveFineDetail
+      ? physicalFeatureArea
+      : preserveFineDetail
       ? Math.max(1, Math.floor(cleanup / 5))
       : cleanup === 0
         ? 1
         : Math.max(2, Math.round((cleanup * cleanup) / 2)),
   );
+  if (options.fillSmallHoles && physicalFeatureArea > 0) {
+    fillSmallWhiteHoles(mask, width, height, physicalFeatureArea);
+  }
 
   // A label-coordinate trace keeps the full corrected label canvas so every
   // letter and line retains its original physical position. The older artwork

@@ -92,6 +92,10 @@ export function buildPhotoArtworkSvg(
 ) {
   if (
     vector.coordinateSpace !== 'label' ||
+    vector.reconstructedFromConfirmedRegions !== true ||
+    (vector.productionBlockedReasons?.length ?? 0) > 0 ||
+    (vector.qualityWarnings?.length ?? 0) > 0 ||
+    vector.expectedTextRegionCount !== vector.manualTextCount ||
     Math.abs((vector.calibratedWidth ?? 0) - width) > 0.001 ||
     Math.abs((vector.calibratedHeight ?? 0) - height) > 0.001 ||
     vector.paths.length +
@@ -105,8 +109,9 @@ export function buildPhotoArtworkSvg(
   }
   const widthMm = formatMm(width);
   const heightMm = formatMm(height);
+  const traceVersionId = escapeXml(vector.traceVersionId ?? 'unversioned');
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true">
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-mold-artwork" data-export-version="2" data-page-unit="mm" data-human-reviewed="true" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-text-count="${vector.manualTextCount ?? 0}" data-photo-graphic-count="${vector.tracedGraphicRegionCount ?? 0}">
   <title>${escapeXml(fileName)} — 纯图文 ${widthMm}×${heightMm}mm</title>
   <desc>仅含曲线路径，不额外生成皮色、照片或示意缝线。自动描绘可能误取旧缝线或皮纹，使用前须逐字、逐线核对。</desc>
   <g id="纯图文曲线" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
@@ -285,7 +290,7 @@ export function buildLeatherLabelSvg(config: LeatherLabelSvgConfig) {
       : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}">
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${width}mm" height="${height}mm" viewBox="0 0 ${width} ${height}" data-artwork-only="false" data-export-profile="leather-label-mockup" data-production-use="prohibited">
   <title>${escapeXml(config.fileName)} — ${width}×${height}mm</title>
   <desc>${escapeXml(config.category)} / ${escapeXml(
     config.labelType,

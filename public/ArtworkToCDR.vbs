@@ -1,7 +1,8 @@
 Option Explicit
 
 Dim args, fso, svgPath, cdrPath, basePath, stamp, sourceFile, sourceText
-Dim artworkOnly, widthPattern, heightPattern, expectedWidth, expectedHeight
+Dim artworkOnly, widthPattern, heightPattern, viewBoxPattern, viewBoxMatch
+Dim expectedWidth, expectedHeight, viewX, viewY, viewWidth, viewHeight
 Dim corel, document, allShapes, textShapes, saveOptions, pageWidth, pageHeight
 Dim shell, publicRoot, stagingFolder, stagedSvgPath, stagedCdrPath, importedShape, usableShapes
 
@@ -42,6 +43,32 @@ sourceText = sourceFile.ReadAll
 sourceFile.Close
 artworkOnly = InStr(1, sourceText, "data-artwork-only=""true""", vbTextCompare) > 0
 
+If Not artworkOnly Then
+  Report "Rejected: this is not a pure black artwork file. Full label mockups, leather colors and stitch lines cannot be converted by the mold-artwork helper.", 16, "Save as CDR"
+  WScript.Quit 1
+End If
+If InStr(1, sourceText, "data-export-profile=""leather-label-mold-artwork""", vbTextCompare) = 0 Or _
+   InStr(1, sourceText, "data-export-version=""2""", vbTextCompare) = 0 Or _
+   InStr(1, sourceText, "data-human-reviewed=""true""", vbTextCompare) = 0 Then
+  Report "Rejected: the production export marker is missing or outdated. Download the pure artwork SVG again from the current leather label designer.", 16, "Save as CDR"
+  WScript.Quit 1
+End If
+If InStr(1, sourceText, "<image", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<text", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<rect", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<line", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<use", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<style", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<script", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<foreignObject", vbTextCompare) > 0 Then
+  Report "Rejected: mold artwork may contain groups and closed paths only. No CDR was saved.", 16, "Save as CDR"
+  WScript.Quit 1
+End If
+If InStr(1, sourceText, "<path", vbTextCompare) = 0 Then
+  Report "Rejected: the pure artwork file contains no curve paths.", 16, "Save as CDR"
+  WScript.Quit 1
+End If
+
 If artworkOnly Then
   Set widthPattern = New RegExp
   widthPattern.Pattern = "width=""([0-9]+(\.[0-9]+)?)mm"""
@@ -55,6 +82,28 @@ If artworkOnly Then
   End If
   expectedWidth = CDbl(widthPattern.Execute(sourceText)(0).SubMatches(0))
   expectedHeight = CDbl(heightPattern.Execute(sourceText)(0).SubMatches(0))
+  If expectedWidth < 10 Or expectedWidth > 200 Or expectedHeight < 10 Or expectedHeight > 150 Then
+    Report "The millimeter page size is outside the supported label range. No CDR was saved.", 16, "Save as CDR"
+    WScript.Quit 1
+  End If
+  Set viewBoxPattern = New RegExp
+  viewBoxPattern.Pattern = "viewBox=""[ ]*([-0-9.]+)[ ,]+([-0-9.]+)[ ,]+([0-9.]+)[ ,]+([0-9.]+)[ ]*"""
+  viewBoxPattern.IgnoreCase = True
+  If Not viewBoxPattern.Test(sourceText) Then
+    Report "The artwork SVG has no valid millimeter viewBox. No CDR was saved.", 16, "Save as CDR"
+    WScript.Quit 1
+  End If
+  Set viewBoxMatch = viewBoxPattern.Execute(sourceText)(0)
+  viewX = CDbl(viewBoxMatch.SubMatches(0))
+  viewY = CDbl(viewBoxMatch.SubMatches(1))
+  viewWidth = CDbl(viewBoxMatch.SubMatches(2))
+  viewHeight = CDbl(viewBoxMatch.SubMatches(3))
+  If Abs(viewX) > 0.001 Or Abs(viewY) > 0.001 Or _
+     Abs(viewWidth - expectedWidth) > 0.001 Or _
+     Abs(viewHeight - expectedHeight) > 0.001 Then
+    Report "The SVG viewBox does not match its millimeter page. No CDR was saved.", 16, "Save as CDR"
+    WScript.Quit 1
+  End If
   If InStr(1, sourceText, "<image", vbTextCompare) > 0 Or _
      InStr(1, sourceText, "<text", vbTextCompare) > 0 Then
     Report "Artwork-only SVG unexpectedly contains a bitmap or live text. No CDR was saved.", 16, "Save as CDR"
@@ -63,11 +112,11 @@ If artworkOnly Then
 End If
 
 basePath = Left(svgPath, Len(svgPath) - 4)
-cdrPath = basePath & ".cdr"
+cdrPath = basePath & "_CDR-REVIEW.cdr"
 If fso.FileExists(cdrPath) Then
   stamp = Year(Now) & Right("0" & Month(Now), 2) & Right("0" & Day(Now), 2) & "-" & _
           Right("0" & Hour(Now), 2) & Right("0" & Minute(Now), 2) & Right("0" & Second(Now), 2)
-  cdrPath = basePath & "_" & stamp & ".cdr"
+  cdrPath = basePath & "_CDR-REVIEW_" & stamp & ".cdr"
 End If
 
 ' The SVG importer in CorelDRAW 2020 can silently lose paths when its source
@@ -156,11 +205,6 @@ If artworkOnly Then
       End If
     End If
   Next
-Else
-  pageWidth = Round(allShapes.SizeWidth, 3)
-  pageHeight = Round(allShapes.SizeHeight, 3)
-  document.ActivePage.SetSize pageWidth, pageHeight
-  allShapes.SetPosition pageWidth / 2, pageHeight / 2
 End If
 
 Set textShapes = document.ActivePage.Shapes.FindShapes("", 6)
@@ -171,7 +215,13 @@ If artworkOnly And textShapes.Count > 0 Then
   fso.DeleteFolder stagingFolder, True
   WScript.Quit 1
 End If
-If textShapes.Count > 0 Then textShapes.ConvertToCurves
+If textShapes.Count > 0 Then
+  Report "Live text was found after import. No CDR was saved.", 16, "Save as CDR"
+  document.Close
+  SafeQuitCorel
+  fso.DeleteFolder stagingFolder, True
+  WScript.Quit 1
+End If
 
 Set saveOptions = corel.CreateStructSaveAsOptions()
 saveOptions.Overwrite = False

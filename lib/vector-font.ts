@@ -7,8 +7,10 @@ export const CURVE_FONT_OPTIONS = [
 ] as const;
 
 export type CurveFontId = (typeof CURVE_FONT_OPTIONS)[number]['id'];
+export type CurveFontChoiceId = CurveFontId | 'custom';
 
 const cachedFonts = new Map<CurveFontId, Promise<Font>>();
+const cachedCustomFonts = new WeakMap<ArrayBuffer, Font>();
 
 export function curveFontOption(id: string) {
   return CURVE_FONT_OPTIONS.find((option) => option.id === id);
@@ -32,13 +34,33 @@ async function loadCurveFont(id: CurveFontId): Promise<Font> {
   return loading;
 }
 
+function loadCustomCurveFont(buffer: ArrayBuffer) {
+  const existing = cachedCustomFonts.get(buffer);
+  if (existing) return existing;
+  const font = opentype.parse(buffer.slice(0));
+  cachedCustomFonts.set(buffer, font);
+  return font;
+}
+
+export function validateCustomCurveFont(buffer: ArrayBuffer) {
+  loadCustomCurveFont(buffer);
+}
+
 /** Returns true font outlines, never text pixels or an OS fallback font. */
 export async function confirmedTextCurve(
   text: string,
-  fontId: CurveFontId,
+  fontId: CurveFontChoiceId,
   target: { x: number; y: number; width: number; height: number },
+  customFontBuffer?: ArrayBuffer,
 ) {
-  const font = await loadCurveFont(fontId);
+  const font =
+    fontId === 'custom'
+      ? customFontBuffer
+        ? loadCustomCurveFont(customFontBuffer)
+        : (() => {
+            throw new Error('请重新选择自定义字体文件。');
+          })()
+      : await loadCurveFont(fontId);
   const missing = [...text].filter(
     (character) => !/\s/u.test(character) && font.charToGlyphIndex(character) === 0,
   );
