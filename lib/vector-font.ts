@@ -76,7 +76,10 @@ export async function confirmedTextCurve(
   if (!(width > 0 && height > 0 && target.width > 0 && target.height > 0)) {
     throw new Error(`“${text}”没有可用的曲线或选区太小。`);
   }
-  const scale = Math.min((target.width * 0.94) / width, (target.height * 0.86) / height);
+  // The selection rectangle is the requested physical text box. Do not add
+  // hidden padding here: it changes the final letter size even when the
+  // customer supplied the exact font file.
+  const scale = Math.min(target.width / width, target.height / height);
   return {
     paths: [path.toPathData(3)],
     x: target.x + (target.width - width * scale) / 2 - bounds.x1 * scale,

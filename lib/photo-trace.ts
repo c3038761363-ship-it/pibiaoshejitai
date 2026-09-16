@@ -40,8 +40,11 @@ export type TracedVector = {
   calibratedHeight?: number;
   overlays?: VectorOverlay[];
   sourcePixelsPerMillimeter?: number;
+  tracePixelsPerMillimeter?: number;
   manualTextCount?: number;
   expectedTextRegionCount?: number;
+  photoTextRegionCount?: number;
+  fontTextRegionCount?: number;
   tracedGraphicRegionCount?: number;
   geometricRegionCount?: number;
   traceVersionId?: string;

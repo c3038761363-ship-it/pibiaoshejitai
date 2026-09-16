@@ -228,6 +228,11 @@ export default function Home() {
     photoProductionBlockers.length === 0 &&
     photoQualityWarnings.length === 0 &&
     asset.vector.expectedTextRegionCount === asset.vector.manualTextCount &&
+    (asset.vector.photoTextRegionCount ?? 0) +
+        (asset.vector.fontTextRegionCount ?? 0) ===
+      (asset.vector.manualTextCount ?? 0) &&
+    ((asset.vector.photoTextRegionCount ?? 0) === 0 ||
+      (asset.vector.tracePixelsPerMillimeter ?? 0) >= 16) &&
     photoArtifactId &&
     reviewedPhotoArtifactId === photoArtifactId,
   );
@@ -1336,7 +1341,7 @@ export default function Home() {
                 />
                 <p className="text-sm leading-6 text-muted-foreground">
                   {isLabelCoordinateAsset
-                    ? '照片复刻中逐字确认的文字已直接成为曲线，CDR端无需安装这些字体；请仍在CDR核对字形和大小。'
+                    ? '照片复刻文字会按两种来源生成：照片可见轮廓不重新换字体；客户提供的确切字体文件会直接转曲。请在叠加预览和CDR中逐字核对。'
                     : '字体由当前电脑读取。请在安装了所选字体的同一台电脑运行CDR助手；助手导入SVG后立即把文字转曲，生成的CDR便不再依赖字体文件。'}
                 </p>
               </div>
@@ -1355,7 +1360,7 @@ export default function Home() {
               <div className="space-y-3 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
                 <p className="font-medium">CDR复核主文件：纯黑图文曲线</p>
                 <p>
-                  只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。已确认文字由字体轮廓直接生成；照片保留的图案仍需逐处检查。
+                  只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。文字来源：照片可见轮廓 {asset.vector.photoTextRegionCount ?? 0} 处，客户确切字体 {asset.vector.fontTextRegionCount ?? 0} 处；两类都必须逐处检查。
                 </p>
                 {!asset.vector.reconstructedFromConfirmedRegions && <p>当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。</p>}
                 {photoProductionBlockers.map((reason) => (
@@ -1364,12 +1369,12 @@ export default function Home() {
                 {photoQualityWarnings.map((warning) => (
                   <p key={warning} className="font-medium">曲线检查未通过：{warning}</p>
                 ))}
-                {(asset.vector.sourcePixelsPerMillimeter ?? 0) < 8 && (
+                {(asset.vector.photoTextRegionCount ?? 0) > 0 &&
+                  (asset.vector.tracePixelsPerMillimeter ?? asset.vector.sourcePixelsPerMillimeter ?? 0) < 16 && (
                   <p>
-                    当前照片约{' '}
-                    {(asset.vector.sourcePixelsPerMillimeter ?? 0).toFixed(1)}{' '}
-                    像素/mm；小字可能缺笔、粘连或误认。已手动重绘{' '}
-                    {asset.vector.manualTextCount ?? 0} 处文字。
+                    原字形正式描绘有效清晰度约{' '}
+                    {(asset.vector.tracePixelsPerMillimeter ?? asset.vector.sourcePixelsPerMillimeter ?? 0).toFixed(1)}{' '}
+                    像素/mm；低于16像素/mm时只允许参考预览，不能下载制模稿。
                   </p>
                 )}
                 {hasAdditionalDesignObjects && (
@@ -1392,7 +1397,7 @@ export default function Home() {
                     }
                   />
                   <span>
-                    我已对照客户资料逐字、逐线核对全部保留内容，确认没有皮纹、旧缝线或错误字形混入；仍会在CDR里检查后再制模。
+                    我已在原图叠加预览中逐字、逐线核对全部保留内容，确认字形、字号、字距、位置、标点和空格一致，且没有皮纹、旧缝线或错误笔画混入；仍会在CDR里检查后再制模。
                   </span>
                 </label>
                 <Button
