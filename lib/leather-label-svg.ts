@@ -84,6 +84,40 @@ function tracedVectorPathsMarkup(vector: TracedVector) {
   return [basePaths, confirmedText].filter(Boolean).join('\n    ');
 }
 
+function tracedVectorPathCount(vector: TracedVector) {
+  return (
+    vector.paths.length +
+    (vector.overlays ?? []).reduce(
+      (count, overlay) => count + overlay.paths.length,
+      0,
+    )
+  );
+}
+
+function contentBoundsAttributes(vector: TracedVector) {
+  const bounds = vector.contentBoundsMm;
+  if (!bounds) return '';
+  return ` data-content-x-mm="${formatMm(bounds.x)}" data-content-y-mm="${formatMm(bounds.y)}" data-content-width-mm="${formatMm(bounds.width)}" data-content-height-mm="${formatMm(bounds.height)}"`;
+}
+
+function contentBoundsFitLabel(
+  vector: TracedVector,
+  width: number,
+  height: number,
+) {
+  const bounds = vector.contentBoundsMm;
+  if (!bounds) return true;
+  const tolerance = 0.001;
+  return (
+    bounds.x >= -tolerance &&
+    bounds.y >= -tolerance &&
+    bounds.width > 0 &&
+    bounds.height > 0 &&
+    bounds.x + bounds.width <= width + tolerance &&
+    bounds.y + bounds.height <= height + tolerance
+  );
+}
+
 export function buildPhotoArtworkSvg(
   vector: TracedVector,
   width: number,
@@ -92,6 +126,7 @@ export function buildPhotoArtworkSvg(
 ) {
   if (
     vector.coordinateSpace !== 'label' ||
+    vector.geometryConfirmed !== true ||
     vector.reconstructedFromConfirmedRegions !== true ||
     (vector.productionBlockedReasons?.length ?? 0) > 0 ||
     (vector.qualityWarnings?.length ?? 0) > 0 ||
@@ -100,14 +135,12 @@ export function buildPhotoArtworkSvg(
       (vector.manualTextCount ?? 0) ||
     ((vector.photoTextRegionCount ?? 0) > 0 &&
       (vector.tracePixelsPerMillimeter ?? 0) < 16) ||
+    ((vector.tracedGraphicRegionCount ?? 0) > 0 &&
+      (vector.tracePixelsPerMillimeter ?? 0) < 8) ||
     Math.abs((vector.calibratedWidth ?? 0) - width) > 0.001 ||
     Math.abs((vector.calibratedHeight ?? 0) - height) > 0.001 ||
-    vector.paths.length +
-      (vector.overlays ?? []).reduce(
-        (count, overlay) => count + overlay.paths.length,
-        0,
-      ) ===
-      0
+    !contentBoundsFitLabel(vector, width, height) ||
+    tracedVectorPathCount(vector) === 0
   ) {
     throw new Error('图文曲线与当前成品尺寸不一致，请重新描绘。');
   }
@@ -115,10 +148,45 @@ export function buildPhotoArtworkSvg(
   const heightMm = formatMm(height);
   const traceVersionId = escapeXml(vector.traceVersionId ?? 'unversioned');
   return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-mold-artwork" data-export-version="2" data-page-unit="mm" data-human-reviewed="true" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-text-count="${vector.manualTextCount ?? 0}" data-photo-text-count="${vector.photoTextRegionCount ?? 0}" data-font-text-count="${vector.fontTextRegionCount ?? 0}" data-photo-graphic-count="${vector.tracedGraphicRegionCount ?? 0}">
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-mold-artwork" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-human-reviewed="true" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-text-count="${vector.manualTextCount ?? 0}" data-photo-text-count="${vector.photoTextRegionCount ?? 0}" data-font-text-count="${vector.fontTextRegionCount ?? 0}" data-photo-graphic-count="${vector.tracedGraphicRegionCount ?? 0}"${contentBoundsAttributes(vector)}>
   <title>${escapeXml(fileName)} — 纯图文 ${widthMm}×${heightMm}mm</title>
   <desc>仅含曲线路径，不额外生成皮色、照片或示意缝线。自动描绘可能误取旧缝线或皮纹，使用前须逐字、逐线核对。</desc>
   <g id="纯图文曲线" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
+    ${tracedVectorPathsMarkup(vector)}
+  </g>
+</svg>`;
+}
+
+export function buildPhotoRepairSvg(
+  vector: TracedVector,
+  width: number,
+  height: number,
+  fileName: string,
+) {
+  if (
+    vector.coordinateSpace !== 'label' ||
+    vector.geometryConfirmed !== true ||
+    vector.reconstructedFromConfirmedRegions !== true ||
+    vector.expectedTextRegionCount !== vector.manualTextCount ||
+    (vector.photoTextRegionCount ?? 0) + (vector.fontTextRegionCount ?? 0) !==
+      (vector.manualTextCount ?? 0) ||
+    Math.abs((vector.calibratedWidth ?? 0) - width) > 0.001 ||
+    Math.abs((vector.calibratedHeight ?? 0) - height) > 0.001 ||
+    !contentBoundsFitLabel(vector, width, height) ||
+    tracedVectorPathCount(vector) === 0
+  ) {
+    throw new Error(
+      '描修工作稿与当前成品尺寸不一致，请重新确认皮牌外边和实测尺寸。',
+    );
+  }
+  const widthMm = formatMm(width);
+  const heightMm = formatMm(height);
+  const traceVersionId = escapeXml(vector.traceVersionId ?? 'unversioned');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-cdr-repair-draft" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-production-ready="false" data-production-use="prohibited" data-human-reviewed="false" data-cdr-review-required="true" data-trace-version="${traceVersionId}"${contentBoundsAttributes(vector)}>
+  <title>${escapeXml(fileName)} — CDR描修工作稿 ${widthMm}×${heightMm}mm</title>
+  <desc>保持整块皮牌的实测毫米坐标，只含照片提取的黑色曲线。低清照片中不可见的细节没有被猜测补全；本文件必须在CorelDRAW逐字逐线描修和审核，不能直接制模。</desc>
+  <g id="CDR描修曲线_不可直接制模" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
     ${tracedVectorPathsMarkup(vector)}
   </g>
 </svg>`;

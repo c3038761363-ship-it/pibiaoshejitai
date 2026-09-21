@@ -57,6 +57,7 @@ import {
 import {
   buildLeatherLabelSvg,
   buildPhotoArtworkSvg,
+  buildPhotoRepairSvg,
   formatMm,
   getLabelLayout,
   type MarkLayout,
@@ -218,18 +219,35 @@ export default function Home() {
   const photoArtifactId = asset?.vector?.traceVersionId ?? null;
   const photoProductionBlockers = asset?.vector?.productionBlockedReasons ?? [];
   const photoQualityWarnings = asset?.vector?.qualityWarnings ?? [];
-  const purePhotoArtworkReady = Boolean(
+  const photoReviewWarnings = asset?.vector?.reviewWarnings ?? [];
+  const photoRepairDraftReady = Boolean(
     isLabelCoordinateAsset &&
     asset?.vector &&
+    asset.vector.geometryConfirmed === true &&
     asset.vector.reconstructedFromConfirmedRegions === true &&
     !labelCoordinateSizeMismatch &&
     !customSizeError &&
     !hasAdditionalDesignObjects &&
+    asset.vector.expectedTextRegionCount === asset.vector.manualTextCount &&
+    (asset.vector.photoTextRegionCount ?? 0) +
+      (asset.vector.fontTextRegionCount ?? 0) ===
+      (asset.vector.manualTextCount ?? 0) &&
+    asset.vector.paths.length +
+      (asset.vector.overlays ?? []).reduce(
+        (count, overlay) => count + overlay.paths.length,
+        0,
+      ) >
+      0,
+  );
+  const purePhotoArtworkReady = Boolean(
+    photoRepairDraftReady &&
+    asset?.vector &&
+    asset.vector.reconstructedFromConfirmedRegions === true &&
     photoProductionBlockers.length === 0 &&
     photoQualityWarnings.length === 0 &&
     asset.vector.expectedTextRegionCount === asset.vector.manualTextCount &&
     (asset.vector.photoTextRegionCount ?? 0) +
-        (asset.vector.fontTextRegionCount ?? 0) ===
+      (asset.vector.fontTextRegionCount ?? 0) ===
       (asset.vector.manualTextCount ?? 0) &&
     ((asset.vector.photoTextRegionCount ?? 0) === 0 ||
       (asset.vector.tracePixelsPerMillimeter ?? 0) >= 16) &&
@@ -720,6 +738,25 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  function downloadPhotoRepairDraft() {
+    if (!photoRepairDraftReady || !asset?.vector) return;
+    const svg = buildPhotoRepairSvg(
+      asset.vector,
+      size.width,
+      size.height,
+      fileName,
+    );
+    const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${safeFileName(fileName)}_${formatMm(size.width)}x${formatMm(size.height)}mm_CDR描修工作稿_不可直接制模.svg`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <Header scaleLabel={scaleLabel} />
@@ -923,14 +960,35 @@ export default function Home() {
           </div>
           {isLabelCoordinateAsset && (
             <div className="mb-4 flex flex-wrap items-center gap-2 text-sm text-white">
-              <button type="button" className={`rounded-lg border px-3 py-2 ${showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`} onClick={() => setShowProductionArtwork(true)}>{asset?.vector?.reconstructedFromConfirmedRegions ? '纯图文制模预览' : '整图描边参考预览'}</button>
-              <button type="button" className={`rounded-lg border px-3 py-2 ${!showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`} onClick={() => setShowProductionArtwork(false)}>皮牌成品示意</button>
-              <span className="text-white/65">{asset?.vector?.reconstructedFromConfirmedRegions ? '制模预览' : '参考预览'}只显示黑色曲线，不显示皮色和示意缝线。</span>
+              <button
+                type="button"
+                className={`rounded-lg border px-3 py-2 ${showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`}
+                onClick={() => setShowProductionArtwork(true)}
+              >
+                {asset?.vector?.reconstructedFromConfirmedRegions
+                  ? '纯图文制模预览'
+                  : '整图描边参考预览'}
+              </button>
+              <button
+                type="button"
+                className={`rounded-lg border px-3 py-2 ${!showProductionArtwork ? 'border-white bg-white text-black' : 'border-white/40'}`}
+                onClick={() => setShowProductionArtwork(false)}
+              >
+                皮牌成品示意
+              </button>
+              <span className="text-white/65">
+                {asset?.vector?.reconstructedFromConfirmedRegions
+                  ? '制模预览'
+                  : '参考预览'}
+                只显示黑色曲线，不显示皮色和示意缝线。
+              </span>
             </div>
           )}
           <div className="preview-stage">
             <div className="ruler-note ruler-note-top">
-              {isLabelCoordinateAsset && showProductionArtwork ? '纯图文制作坐标' : '顶部虚线中心距边3 mm'}
+              {isLabelCoordinateAsset && showProductionArtwork
+                ? '纯图文制作坐标'
+                : '顶部虚线中心距边3 mm'}
             </div>
             <div
               className="label-frame"
@@ -948,26 +1006,34 @@ export default function Home() {
                   y="0"
                   width={size.width}
                   height={size.height}
-                  fill={isLabelCoordinateAsset && showProductionArtwork ? '#ffffff' : leatherColor}
+                  fill={
+                    isLabelCoordinateAsset && showProductionArtwork
+                      ? '#ffffff'
+                      : leatherColor
+                  }
                 />
-                {(!isLabelCoordinateAsset || !showProductionArtwork) && <line
-                  x1={effectiveStitchInset}
-                  x2={size.width - effectiveStitchInset}
-                  y1="3"
-                  y2="3"
-                  stroke="#000000"
-                  strokeWidth="0.45"
-                  strokeDasharray={`${dashLength} ${dashGap}`}
-                />}
-                {(!isLabelCoordinateAsset || !showProductionArtwork) && <line
-                  x1={effectiveStitchInset}
-                  x2={size.width - effectiveStitchInset}
-                  y1={size.height - 3}
-                  y2={size.height - 3}
-                  stroke="#000000"
-                  strokeWidth="0.45"
-                  strokeDasharray={`${dashLength} ${dashGap}`}
-                />}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && (
+                  <line
+                    x1={effectiveStitchInset}
+                    x2={size.width - effectiveStitchInset}
+                    y1="3"
+                    y2="3"
+                    stroke="#000000"
+                    strokeWidth="0.45"
+                    strokeDasharray={`${dashLength} ${dashGap}`}
+                  />
+                )}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) && (
+                  <line
+                    x1={effectiveStitchInset}
+                    x2={size.width - effectiveStitchInset}
+                    y1={size.height - 3}
+                    y2={size.height - 3}
+                    stroke="#000000"
+                    strokeWidth="0.45"
+                    strokeDasharray={`${dashLength} ${dashGap}`}
+                  />
+                )}
                 {asset?.kind === 'traced-vector' && asset.vector && (
                   <svg
                     x={effectiveAssetX}
@@ -980,7 +1046,15 @@ export default function Home() {
                     }
                     overflow="visible"
                   >
-                    <g fill={isLabelCoordinateAsset && showProductionArtwork ? '#000000' : stampColor} fillRule="evenodd" stroke="none">
+                    <g
+                      fill={
+                        isLabelCoordinateAsset && showProductionArtwork
+                          ? '#000000'
+                          : stampColor
+                      }
+                      fillRule="evenodd"
+                      stroke="none"
+                    >
                       {asset.vector.paths.map((path, index) => (
                         <path key={`${path.slice(0, 24)}-${index}`} d={path} />
                       ))}
@@ -1008,46 +1082,49 @@ export default function Home() {
                     preserveAspectRatio="xMidYMid meet"
                   />
                 )}
-                {(!isLabelCoordinateAsset || !showProductionArtwork) && markShape !== 'none' && (
-                  <VectorMarkPreview
-                    x={layout.markX}
-                    y={layout.markY}
-                    size={effectiveMarkSize}
-                    shape={markShape}
-                    text={markText}
-                    color={markColor}
-                    fontFamily={mainFontOption.stack}
-                  />
-                )}
-                {(!isLabelCoordinateAsset || !showProductionArtwork) && mainText && (
-                  <text
-                    x={layout.textX}
-                    y={layout.textY}
-                    fill={stampColor}
-                    fontFamily={mainFontOption.stack}
-                    fontSize={fontSize}
-                    fontWeight="700"
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    letterSpacing={letterSpacing}
-                  >
-                    {mainText}
-                  </text>
-                )}
-                {(!isLabelCoordinateAsset || !showProductionArtwork) && subText && (
-                  <text
-                    x={layout.textX}
-                    y={layout.textY + fontSize * 0.72}
-                    fill={stampColor}
-                    fontFamily={subFontOption.stack}
-                    fontSize={Math.max(2.5, fontSize * 0.34)}
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    letterSpacing="0.45"
-                  >
-                    {subText}
-                  </text>
-                )}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) &&
+                  markShape !== 'none' && (
+                    <VectorMarkPreview
+                      x={layout.markX}
+                      y={layout.markY}
+                      size={effectiveMarkSize}
+                      shape={markShape}
+                      text={markText}
+                      color={markColor}
+                      fontFamily={mainFontOption.stack}
+                    />
+                  )}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) &&
+                  mainText && (
+                    <text
+                      x={layout.textX}
+                      y={layout.textY}
+                      fill={stampColor}
+                      fontFamily={mainFontOption.stack}
+                      fontSize={fontSize}
+                      fontWeight="700"
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      letterSpacing={letterSpacing}
+                    >
+                      {mainText}
+                    </text>
+                  )}
+                {(!isLabelCoordinateAsset || !showProductionArtwork) &&
+                  subText && (
+                    <text
+                      x={layout.textX}
+                      y={layout.textY + fontSize * 0.72}
+                      fill={stampColor}
+                      fontFamily={subFontOption.stack}
+                      fontSize={Math.max(2.5, fontSize * 0.34)}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      letterSpacing="0.45"
+                    >
+                      {subText}
+                    </text>
+                  )}
               </svg>
             </div>
             <div className="dimension-line dimension-width">
@@ -1057,7 +1134,9 @@ export default function Home() {
               <span>{formatMm(size.height)} mm</span>
             </div>
             <div className="ruler-note ruler-note-bottom">
-              {isLabelCoordinateAsset && showProductionArtwork ? '图文仅供复核，制模前在CDR逐处检查' : '底部虚线中心距边3 mm'}
+              {isLabelCoordinateAsset && showProductionArtwork
+                ? '图文仅供复核，制模前在CDR逐处检查'
+                : '底部虚线中心距边3 mm'}
             </div>
           </div>
           {contentWarning && (
@@ -1249,7 +1328,7 @@ export default function Home() {
                 </div>
                 {isLabelCoordinateAsset ? (
                   <div
-                    className={`rounded-xl border p-3 text-sm leading-6 ${labelCoordinateSizeMismatch ? 'border-amber-600/25 bg-amber-500/10 text-amber-900' : 'border-emerald-600/25 bg-emerald-500/[0.07] text-emerald-900'}`}
+                    className={`rounded-xl border p-3 text-sm leading-6 ${labelCoordinateSizeMismatch || asset.vector?.geometryConfirmed !== true ? 'border-amber-600/25 bg-amber-500/10 text-amber-900' : 'border-emerald-600/25 bg-emerald-500/[0.07] text-emerald-900'}`}
                   >
                     <span className="font-medium">
                       已锁定为 {formatMm(calibratedAssetWidth)} ×{' '}
@@ -1258,7 +1337,9 @@ export default function Home() {
                     <span className="block">
                       {labelCoordinateSizeMismatch
                         ? '当前成品尺寸已经改变，已暂停导出，防止旧图文被拉伸。请改回原尺寸或重新描绘。'
-                        : '图文会保持四角校正后的原始边距和位置，不再自动居中、缩放或铺满画布。'}
+                        : asset.vector?.geometryConfirmed !== true
+                          ? '这份旧结果没有“成品外边与实测尺寸已确认”记录。请重新打开照片复刻，先裁准皮牌外边并锁定毫米尺寸。'
+                          : '图文会保持四角校正后的原始边距和位置，不再自动居中、缩放或铺满画布。'}
                     </span>
                   </div>
                 ) : (
@@ -1341,40 +1422,94 @@ export default function Home() {
                 />
                 <p className="text-sm leading-6 text-muted-foreground">
                   {isLabelCoordinateAsset
-                    ? '照片复刻文字会按两种来源生成：照片可见轮廓不重新换字体；客户提供的确切字体文件会直接转曲。请在叠加预览和CDR中逐字核对。'
+                    ? '照片复刻默认把字母当作图形，按照片可见轮廓和原位置生成曲线，不要求客户知道字体；只有客户恰好提供原字体时才使用字体文件。请在叠加预览和CDR中逐字核对。'
                     : '字体由当前电脑读取。请在安装了所选字体的同一台电脑运行CDR助手；助手导入SVG后立即把文字转曲，生成的CDR便不再依赖字体文件。'}
                 </p>
               </div>
             </div>
-            {!isLabelCoordinateAsset && <Button
-              type="button"
-              size="lg"
-              className="h-11 w-full"
-              onClick={downloadSvg}
-              disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}
-            >
-              {exported ? <Check aria-hidden="true" /> : <Download aria-hidden="true" />}
-              {exported ? '排版工作稿已下载' : '下载排版工作稿（CDR人工复核）'}
-            </Button>}
+            {!isLabelCoordinateAsset && (
+              <Button
+                type="button"
+                size="lg"
+                className="h-11 w-full"
+                onClick={downloadSvg}
+                disabled={Boolean(
+                  customSizeError ||
+                  contentWarning ||
+                  labelCoordinateSizeMismatch,
+                )}
+              >
+                {exported ? (
+                  <Check aria-hidden="true" />
+                ) : (
+                  <Download aria-hidden="true" />
+                )}
+                {exported
+                  ? '排版工作稿已下载'
+                  : '下载排版工作稿（CDR人工复核）'}
+              </Button>
+            )}
             {isLabelCoordinateAsset && asset?.vector && (
               <div className="space-y-3 rounded-xl border border-amber-600/25 bg-amber-500/10 p-3 text-sm leading-6 text-amber-900">
                 <p className="font-medium">CDR复核主文件：纯黑图文曲线</p>
                 <p>
-                  只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。文字来源：照片可见轮廓 {asset.vector.photoTextRegionCount ?? 0} 处，客户确切字体 {asset.vector.fontTextRegionCount ?? 0} 处；两类都必须逐处检查。
+                  只含黑色曲线和成品毫米尺寸，不含皮色、照片或示意缝线。文字来源：照片可见轮廓{' '}
+                  {asset.vector.photoTextRegionCount ?? 0} 处，客户确切字体{' '}
+                  {asset.vector.fontTextRegionCount ?? 0}{' '}
+                  处；两类都必须逐处检查。
                 </p>
-                {!asset.vector.reconstructedFromConfirmedRegions && <p>当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。</p>}
+                {!asset.vector.reconstructedFromConfirmedRegions && (
+                  <p>
+                    当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。
+                  </p>
+                )}
                 {photoProductionBlockers.map((reason) => (
-                  <p key={reason} className="font-medium text-destructive">下载已锁定：{reason}</p>
+                  <p key={reason} className="font-medium text-destructive">
+                    下载已锁定：{reason}
+                  </p>
                 ))}
                 {photoQualityWarnings.map((warning) => (
-                  <p key={warning} className="font-medium">曲线检查未通过：{warning}</p>
+                  <p key={warning} className="font-medium">
+                    曲线检查未通过：{warning}
+                  </p>
+                ))}
+                {photoReviewWarnings.map((warning) => (
+                  <p key={warning}>照片清晰度提示：{warning}</p>
                 ))}
                 {(asset.vector.photoTextRegionCount ?? 0) > 0 &&
-                  (asset.vector.tracePixelsPerMillimeter ?? asset.vector.sourcePixelsPerMillimeter ?? 0) < 16 && (
+                  (asset.vector.tracePixelsPerMillimeter ?? 0) < 16 && (
+                    <p className="font-medium">
+                      当前照片原字形约{' '}
+                      {(asset.vector.tracePixelsPerMillimeter ?? 0).toFixed(1)}{' '}
+                      像素/mm，细笔画不足以由网站判定为制模候选；但可以下载下方的CDR描修工作稿，按原尺寸逐字修整。无需客户提供字体。
+                    </p>
+                  )}
+                {asset.vector.contentBoundsMm && (
                   <p>
-                    原字形正式描绘有效清晰度约{' '}
-                    {(asset.vector.tracePixelsPerMillimeter ?? asset.vector.sourcePixelsPerMillimeter ?? 0).toFixed(1)}{' '}
-                    像素/mm；低于16像素/mm时只允许参考预览，不能下载制模稿。
+                    已确认图文区域约{' '}
+                    {formatMm(asset.vector.contentBoundsMm.width)} ×{' '}
+                    {formatMm(asset.vector.contentBoundsMm.height)}{' '}
+                    mm；左/上/右/下边距约为{' '}
+                    {formatMm(asset.vector.contentBoundsMm.x)} /{' '}
+                    {formatMm(asset.vector.contentBoundsMm.y)} /{' '}
+                    {formatMm(
+                      Math.max(
+                        0,
+                        size.width -
+                          asset.vector.contentBoundsMm.x -
+                          asset.vector.contentBoundsMm.width,
+                      ),
+                    )}{' '}
+                    /{' '}
+                    {formatMm(
+                      Math.max(
+                        0,
+                        size.height -
+                          asset.vector.contentBoundsMm.y -
+                          asset.vector.contentBoundsMm.height,
+                      ),
+                    )}{' '}
+                    mm。导出按整牌尺寸定位，不会把字母铺满皮牌。
                   </p>
                 )}
                 {hasAdditionalDesignObjects && (
@@ -1382,13 +1517,27 @@ export default function Home() {
                     画布上还有单独输入的文字或徽标，纯图文下载不会包含它们。请先清空这些额外对象，或只下载完整示意稿。
                   </p>
                 )}
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full"
+                  onClick={downloadPhotoRepairDraft}
+                  disabled={!photoRepairDraftReady}
+                >
+                  <Download aria-hidden="true" />
+                  下载CDR描修工作稿（不可直接制模）
+                </Button>
+                <p className="text-xs leading-5">
+                  低清照片或仍有毛边时也可下载这份黑白曲线；它保持整牌毫米尺寸和原图位置，供你在CDR逐字逐线修整，不会冒充已通过的制模稿。
+                </p>
                 <label className="flex items-start gap-2">
                   <input
                     type="checkbox"
                     className="mt-1 size-4 accent-[var(--primary)]"
                     checked={Boolean(
                       photoArtifactId &&
-                        reviewedPhotoArtifactId === photoArtifactId,
+                      reviewedPhotoArtifactId === photoArtifactId,
                     )}
                     onChange={(event) =>
                       setReviewedPhotoArtifactId(
@@ -1410,7 +1559,11 @@ export default function Home() {
                   <Download aria-hidden="true" />
                   下载纯图文制模稿（CDR待复核）
                 </Button>
-                <a className="cdr-helper-link" href="/ArtworkToCDR.vbs" download="皮牌纯图文制模_CDR助手_v2.vbs">
+                <a
+                  className="cdr-helper-link"
+                  href="/ArtworkToCDR.vbs"
+                  download="皮牌纯图文制模_CDR助手_v2.vbs"
+                >
                   下载纯图文专用 CDR 助手 v2
                 </a>
                 <p className="text-xs leading-5">
@@ -1418,24 +1571,46 @@ export default function Home() {
                 </p>
               </div>
             )}
-            {isLabelCoordinateAsset && <Button type="button" variant="outline" className="w-full" onClick={downloadSvg} disabled={Boolean(customSizeError || contentWarning || labelCoordinateSizeMismatch)}>
-              <Download aria-hidden="true" />
-              另存完整皮牌示意图（禁止制模）
-            </Button>}
+            {isLabelCoordinateAsset && (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                onClick={downloadSvg}
+                disabled={Boolean(
+                  customSizeError ||
+                  contentWarning ||
+                  labelCoordinateSizeMismatch,
+                )}
+              >
+                <Download aria-hidden="true" />
+                另存完整皮牌示意图（禁止制模）
+              </Button>
+            )}
             {isLabelCoordinateAsset && (
               <p className="text-xs leading-5 text-muted-foreground">
-                请删除以前下载的旧助手。旧版可能按图案外接框改变页面尺寸；v2 若不能确认纯稿标记和毫米尺寸，会直接停止，不生成错误CDR。
+                请删除以前下载的旧助手。旧版可能按图案外接框改变页面尺寸；v2
+                若不能确认纯稿标记和毫米尺寸，会直接停止，不生成错误CDR。
               </p>
             )}
             <ol className="space-y-2 text-sm leading-6 text-muted-foreground">
               <li>
-                <StepNumber>1</StepNumber>{isLabelCoordinateAsset ? '下载纯图文稿和v2助手。' : '下载排版工作稿。'}
+                <StepNumber>1</StepNumber>
+                {isLabelCoordinateAsset
+                  ? '下载纯图文稿和v2助手。'
+                  : '下载排版工作稿。'}
               </li>
               <li>
-                <StepNumber>2</StepNumber>{isLabelCoordinateAsset ? '把带“纯图文制模稿”的SVG拖到v2助手上。' : '在CorelDRAW中打开SVG并逐项检查。'}
+                <StepNumber>2</StepNumber>
+                {isLabelCoordinateAsset
+                  ? '把带“纯图文制模稿”的SVG拖到v2助手上。'
+                  : '在CorelDRAW中打开SVG并逐项检查。'}
               </li>
               <li>
-                <StepNumber>3</StepNumber>{isLabelCoordinateAsset ? '同一文件夹生成“CDR待人工复核”文件。' : '文字转曲、确认尺寸后保存为CDR。'}
+                <StepNumber>3</StepNumber>
+                {isLabelCoordinateAsset
+                  ? '同一文件夹生成“CDR待人工复核”文件。'
+                  : '文字转曲、确认尺寸后保存为CDR。'}
               </li>
             </ol>
             <div className="space-y-2 border-t pt-4">

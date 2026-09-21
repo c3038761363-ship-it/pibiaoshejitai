@@ -31,6 +31,13 @@ export type VectorOverlay = {
   scaleY: number;
 };
 
+export type PhysicalBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 export type TracedVector = {
   viewBoxWidth: number;
   viewBoxHeight: number;
@@ -48,8 +55,11 @@ export type TracedVector = {
   tracedGraphicRegionCount?: number;
   geometricRegionCount?: number;
   traceVersionId?: string;
+  geometryConfirmed?: boolean;
+  contentBoundsMm?: PhysicalBounds;
   productionBlockedReasons?: string[];
   qualityWarnings?: string[];
+  reviewWarnings?: string[];
   excludedRegionCount?: number;
   reconstructedFromConfirmedRegions?: boolean;
 };
@@ -64,6 +74,7 @@ export type TracePreprocessOptions = {
   pixelsPerMillimeter?: number;
   minimumFeatureMm?: number;
   fillSmallHoles?: boolean;
+  smoothEdges?: boolean;
 };
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -310,7 +321,11 @@ function chooseStructuralMask(
   if (lightIsUseful && !darkIsUseful) return light.mask;
   // The sparser response is often just the photographed stitch or a pair of
   // rules. Do not discard a usable lettering candidate for that reason.
-  if (dark.fraction < 0.025 && light.fraction >= 0.025 && light.fraction <= 0.42)
+  if (
+    dark.fraction < 0.025 &&
+    light.fraction >= 0.025 &&
+    light.fraction <= 0.42
+  )
     return light.mask;
   if (light.fraction < 0.025 && dark.fraction >= 0.025 && dark.fraction <= 0.42)
     return dark.mask;
@@ -360,6 +375,29 @@ function closeSinglePixelGaps(mask: Uint8Array, width: number, height: number) {
   }
 
   return closed;
+}
+
+function stabilizeBinaryEdges(mask: Uint8Array, width: number, height: number) {
+  if (width < 3 || height < 3) return;
+  const result = new Uint8Array(mask);
+
+  // One conservative majority pass removes one-pixel leather burrs and fills
+  // one-pixel bites. It never rescales or repositions the photographed glyph.
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      let selected = 0;
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          selected += mask[(y + offsetY) * width + x + offsetX];
+        }
+      }
+      const index = y * width + x;
+      if (mask[index] === 1 && selected <= 3) result[index] = 0;
+      if (mask[index] === 0 && selected >= 6) result[index] = 1;
+    }
+  }
+
+  mask.set(result);
 }
 
 function removeSmallBlackAreas(
@@ -452,7 +490,12 @@ function fillSmallWhiteHoles(
       if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
         touchesEdge = true;
       }
-      const neighbours = [current - 1, current + 1, current - width, current + width];
+      const neighbours = [
+        current - 1,
+        current + 1,
+        current - width,
+        current + width,
+      ];
       for (const next of neighbours) {
         if (next < 0 || next >= mask.length) continue;
         const nextX = next % width;
@@ -790,6 +833,7 @@ export function preprocessForTrace(
     height,
     options.edgeCleanupPercent,
   );
+  if (options.smoothEdges) stabilizeBinaryEdges(mask, width, height);
   if (!preserveFineDetail) mask = closeSinglePixelGaps(mask, width, height);
   const physicalFeaturePixels =
     (options.minimumFeatureMm ?? 0) * (options.pixelsPerMillimeter ?? 0);
@@ -804,10 +848,10 @@ export function preprocessForTrace(
     physicalFeatureArea > 0 && !preserveFineDetail
       ? physicalFeatureArea
       : preserveFineDetail
-      ? Math.max(1, Math.floor(cleanup / 5))
-      : cleanup === 0
-        ? 1
-        : Math.max(2, Math.round((cleanup * cleanup) / 2)),
+        ? Math.max(1, Math.floor(cleanup / 5))
+        : cleanup === 0
+          ? 1
+          : Math.max(2, Math.round((cleanup * cleanup) / 2)),
   );
   if (options.fillSmallHoles && physicalFeatureArea > 0) {
     fillSmallWhiteHoles(mask, width, height, physicalFeatureArea);
