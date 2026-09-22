@@ -61,6 +61,7 @@ export type TracedVector = {
   qualityWarnings?: string[];
   reviewWarnings?: string[];
   excludedRegionCount?: number;
+  manualEraseRegionCount?: number;
   reconstructedFromConfirmedRegions?: boolean;
 };
 

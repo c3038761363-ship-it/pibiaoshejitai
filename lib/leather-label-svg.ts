@@ -66,6 +66,93 @@ function formatScale(value: number) {
   return Number(value.toFixed(9)).toString();
 }
 
+export type CurveOnlySvgAudit = {
+  passed: boolean;
+  pathCount: number;
+  liveTextObjectCount: number;
+  bitmapObjectCount: number;
+  externalReferenceCount: number;
+  unsupportedElements: string[];
+};
+
+export type PhotoGlyphFidelity =
+  | 'photo-outline-approximate'
+  | 'exact-font-curves'
+  | 'mixed-photo-and-font-curves'
+  | 'no-confirmed-text';
+
+const CURVE_ONLY_ALLOWED_ELEMENTS = new Set([
+  'svg',
+  'g',
+  'path',
+  'title',
+  'desc',
+]);
+
+export function getPhotoGlyphFidelity(
+  vector: TracedVector,
+): PhotoGlyphFidelity {
+  const photoTextCount = vector.photoTextRegionCount ?? 0;
+  const fontTextCount = vector.fontTextRegionCount ?? 0;
+  if (photoTextCount > 0 && fontTextCount > 0) {
+    return 'mixed-photo-and-font-curves';
+  }
+  if (photoTextCount > 0) return 'photo-outline-approximate';
+  if (fontTextCount > 0) return 'exact-font-curves';
+  return 'no-confirmed-text';
+}
+
+/**
+ * Audits the exact SVG string that will be downloaded. Metadata-only title and
+ * desc elements are allowed; every rendered object must be a path inside groups.
+ */
+export function auditCurveOnlySvg(svg: string): CurveOnlySvgAudit {
+  const openingElementMatches = Array.from(
+    svg.matchAll(/<\s*(?![/? !])([A-Za-z][\w:.-]*)\b[^>]*>/gu),
+  );
+  const openingTags = openingElementMatches.map((match) =>
+    match[1].toLowerCase(),
+  );
+  const openingElementMarkup = openingElementMatches
+    .map((match) => match[0])
+    .join('\n');
+  const pathElements = svg.match(/<\s*path\b[^>]*>/giu) ?? [];
+  const pathCount = pathElements.filter((element) => {
+    const pathData = element.match(/\bd\s*=\s*(["'])(.*?)\1/iu)?.[2];
+    return Boolean(pathData?.trim());
+  }).length;
+  const liveTextObjectCount = openingTags.filter(
+    (name) => name === 'text',
+  ).length;
+  const bitmapObjectCount =
+    openingTags.filter((name) => name === 'image').length +
+    (openingElementMarkup.match(/data\s*:\s*image\//giu)?.length ?? 0);
+  const externalReferenceCount =
+    (openingElementMarkup.match(/\b(?:href|xlink:href)\s*=/giu)?.length ?? 0) +
+    (openingElementMarkup.match(/\burl\s*\(/giu)?.length ?? 0);
+  const unsupportedElements = Array.from(
+    new Set(
+      openingTags.filter((name) => !CURVE_ONLY_ALLOWED_ELEMENTS.has(name)),
+    ),
+  ).sort();
+  const emptyPathCount = pathElements.length - pathCount;
+  if (emptyPathCount > 0) unsupportedElements.push('empty-path');
+
+  return {
+    passed:
+      pathCount > 0 &&
+      liveTextObjectCount === 0 &&
+      bitmapObjectCount === 0 &&
+      externalReferenceCount === 0 &&
+      unsupportedElements.length === 0,
+    pathCount,
+    liveTextObjectCount,
+    bitmapObjectCount,
+    externalReferenceCount,
+    unsupportedElements,
+  };
+}
+
 function tracedVectorPathsMarkup(vector: TracedVector) {
   const basePaths = vector.paths
     .map((path) => `<path d="${escapeXml(path)}" />`)
@@ -123,8 +210,10 @@ export function buildPhotoArtworkSvg(
   width: number,
   height: number,
   fileName: string,
+  humanReviewed: boolean,
 ) {
   if (
+    !humanReviewed ||
     vector.coordinateSpace !== 'label' ||
     vector.geometryConfirmed !== true ||
     vector.reconstructedFromConfirmedRegions !== true ||
@@ -147,14 +236,19 @@ export function buildPhotoArtworkSvg(
   const widthMm = formatMm(width);
   const heightMm = formatMm(height);
   const traceVersionId = escapeXml(vector.traceVersionId ?? 'unversioned');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-mold-artwork" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-human-reviewed="true" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-text-count="${vector.manualTextCount ?? 0}" data-photo-text-count="${vector.photoTextRegionCount ?? 0}" data-font-text-count="${vector.fontTextRegionCount ?? 0}" data-photo-graphic-count="${vector.tracedGraphicRegionCount ?? 0}"${contentBoundsAttributes(vector)}>
+  const glyphFidelity = getPhotoGlyphFidelity(vector);
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-mold-artwork" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-perspective-corrected="true" data-reconstruction="confirmed-regions-only" data-object-model="paths-only" data-live-text-count="0" data-bitmap-count="0" data-source-photo-embedded="false" data-curve-audit="passed" data-texture-review="human-confirmed" data-glyph-fidelity="${glyphFidelity}" data-human-reviewed="true" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-text-count="${vector.manualTextCount ?? 0}" data-photo-text-count="${vector.photoTextRegionCount ?? 0}" data-font-text-count="${vector.fontTextRegionCount ?? 0}" data-photo-graphic-count="${vector.tracedGraphicRegionCount ?? 0}" data-manual-erase-count="${vector.manualEraseRegionCount ?? 0}"${contentBoundsAttributes(vector)}>
   <title>${escapeXml(fileName)} — 纯图文 ${widthMm}×${heightMm}mm</title>
   <desc>仅含曲线路径，不额外生成皮色、照片或示意缝线。自动描绘可能误取旧缝线或皮纹，使用前须逐字、逐线核对。</desc>
   <g id="纯图文曲线" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
     ${tracedVectorPathsMarkup(vector)}
   </g>
 </svg>`;
+  if (!auditCurveOnlySvg(svg).passed) {
+    throw new Error('纯图文文件中发现非曲线对象，已停止导出。');
+  }
+  return svg;
 }
 
 export function buildPhotoRepairSvg(
@@ -182,14 +276,19 @@ export function buildPhotoRepairSvg(
   const widthMm = formatMm(width);
   const heightMm = formatMm(height);
   const traceVersionId = escapeXml(vector.traceVersionId ?? 'unversioned');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-cdr-repair-draft" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-production-ready="false" data-production-use="prohibited" data-human-reviewed="false" data-cdr-review-required="true" data-trace-version="${traceVersionId}"${contentBoundsAttributes(vector)}>
+  const glyphFidelity = getPhotoGlyphFidelity(vector);
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${widthMm}mm" height="${heightMm}mm" viewBox="0 0 ${widthMm} ${heightMm}" data-artwork-only="true" data-export-profile="leather-label-cdr-repair-draft" data-export-version="3" data-page-unit="mm" data-geometry-confirmed="true" data-perspective-corrected="true" data-reconstruction="confirmed-regions-only" data-object-model="paths-only" data-live-text-count="0" data-bitmap-count="0" data-source-photo-embedded="false" data-curve-audit="passed" data-texture-review="required" data-glyph-fidelity="${glyphFidelity}" data-production-ready="false" data-production-use="prohibited" data-human-reviewed="false" data-cdr-review-required="true" data-trace-version="${traceVersionId}" data-manual-erase-count="${vector.manualEraseRegionCount ?? 0}"${contentBoundsAttributes(vector)}>
   <title>${escapeXml(fileName)} — CDR描修工作稿 ${widthMm}×${heightMm}mm</title>
   <desc>保持整块皮牌的实测毫米坐标，只含照片提取的黑色曲线。低清照片中不可见的细节没有被猜测补全；本文件必须在CorelDRAW逐字逐线描修和审核，不能直接制模。</desc>
   <g id="CDR描修曲线_不可直接制模" transform="scale(${formatScale(width / vector.viewBoxWidth)} ${formatScale(height / vector.viewBoxHeight)})" fill="#000000" fill-rule="evenodd" stroke="none">
     ${tracedVectorPathsMarkup(vector)}
   </g>
 </svg>`;
+  if (!auditCurveOnlySvg(svg).passed) {
+    throw new Error('描修工作稿中发现非曲线对象，已停止导出。');
+  }
+  return svg;
 }
 
 export function getLabelLayout(input: LabelLayoutInput) {

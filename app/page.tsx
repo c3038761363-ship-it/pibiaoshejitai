@@ -55,10 +55,12 @@ import {
   type DesignTemplate,
 } from '@/lib/label-options';
 import {
+  auditCurveOnlySvg,
   buildLeatherLabelSvg,
   buildPhotoArtworkSvg,
   buildPhotoRepairSvg,
   formatMm,
+  getPhotoGlyphFidelity,
   getLabelLayout,
   type MarkLayout,
   type MarkShape,
@@ -213,6 +215,12 @@ export default function Home() {
     isLabelCoordinateAsset &&
     (Math.abs(calibratedAssetWidth - size.width) > 0.001 ||
       Math.abs(calibratedAssetHeight - size.height) > 0.001);
+  const photoGeometryReady = Boolean(
+    isLabelCoordinateAsset &&
+    asset?.vector?.geometryConfirmed === true &&
+    asset.vector.reconstructedFromConfirmedRegions === true &&
+    !labelCoordinateSizeMismatch,
+  );
   const hasAdditionalDesignObjects = Boolean(
     mainText.trim() || subText.trim() || markShape !== 'none',
   );
@@ -239,8 +247,31 @@ export default function Home() {
       ) >
       0,
   );
+  const photoCurveAudit = useMemo(() => {
+    if (!isLabelCoordinateAsset || !asset?.vector) return null;
+    try {
+      return auditCurveOnlySvg(
+        buildPhotoRepairSvg(asset.vector, size.width, size.height, fileName),
+      );
+    } catch {
+      return null;
+    }
+  }, [asset, fileName, isLabelCoordinateAsset, size.height, size.width]);
+  const photoCurveStructureReady = photoCurveAudit?.passed === true;
+  const photoGlyphFidelity = asset?.vector
+    ? getPhotoGlyphFidelity(asset.vector)
+    : null;
+  const photoGlyphDescription =
+    photoGlyphFidelity === 'photo-outline-approximate'
+      ? '照片可见轮廓的近似复刻，未重新套字体，须逐字核对'
+      : photoGlyphFidelity === 'exact-font-curves'
+        ? '客户提供的确切字体已转为曲线'
+        : photoGlyphFidelity === 'mixed-photo-and-font-curves'
+          ? '照片轮廓近似复刻与客户确切字体转曲混合'
+          : '本次没有登记文字区域';
   const purePhotoArtworkReady = Boolean(
     photoRepairDraftReady &&
+    photoCurveStructureReady &&
     asset?.vector &&
     asset.vector.reconstructedFromConfirmedRegions === true &&
     photoProductionBlockers.length === 0 &&
@@ -726,7 +757,13 @@ export default function Home() {
       size.width,
       size.height,
       fileName,
+      Boolean(photoArtifactId && reviewedPhotoArtifactId === photoArtifactId),
     );
+    const audit = auditCurveOnlySvg(svg);
+    if (!audit.passed) {
+      window.alert('下载已停止：最终文件没有通过纯曲线检查，请重新生成曲线。');
+      return;
+    }
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -739,13 +776,19 @@ export default function Home() {
   }
 
   function downloadPhotoRepairDraft() {
-    if (!photoRepairDraftReady || !asset?.vector) return;
+    if (!photoRepairDraftReady || !photoCurveStructureReady || !asset?.vector)
+      return;
     const svg = buildPhotoRepairSvg(
       asset.vector,
       size.width,
       size.height,
       fileName,
     );
+    const audit = auditCurveOnlySvg(svg);
+    if (!audit.passed) {
+      window.alert('下载已停止：最终文件没有通过纯曲线检查，请重新生成曲线。');
+      return;
+    }
     const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -1458,6 +1501,120 @@ export default function Home() {
                   {asset.vector.fontTextRegionCount ?? 0}{' '}
                   处；两类都必须逐处检查。
                 </p>
+                <div className="space-y-2 rounded-lg border border-stone-300 bg-white/80 p-3 text-stone-800">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-semibold">纯曲线复刻检查</p>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${photoCurveStructureReady ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}
+                    >
+                      {photoCurveStructureReady
+                        ? '文件结构通过'
+                        : '等待重新生成或校准'}
+                    </span>
+                  </div>
+                  <div className="space-y-1.5 text-xs leading-5">
+                    <p className="flex gap-2">
+                      {photoCurveStructureReady ? (
+                        <Check
+                          className="mt-0.5 size-4 shrink-0 text-emerald-700"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <AlertTriangle
+                          className="mt-0.5 size-4 shrink-0 text-amber-700"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span>
+                        图案和文字：
+                        {photoCurveAudit
+                          ? `共 ${photoCurveAudit.pathCount} 条路径，渲染对象全部为曲线。`
+                          : '尚未生成可检查的纯稿。'}
+                      </span>
+                    </p>
+                    <p className="flex gap-2">
+                      {photoCurveStructureReady ? (
+                        <Check
+                          className="mt-0.5 size-4 shrink-0 text-emerald-700"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <AlertTriangle
+                          className="mt-0.5 size-4 shrink-0 text-amber-700"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span>
+                        活字对象 {photoCurveAudit?.liveTextObjectCount ?? '—'}；
+                        位图/照片对象{' '}
+                        {photoCurveAudit?.bitmapObjectCount ?? '—'}； 外部引用{' '}
+                        {photoCurveAudit?.externalReferenceCount ?? '—'}。
+                      </span>
+                    </p>
+                    <p className="flex gap-2">
+                      {photoGeometryReady ? (
+                        <Check
+                          className="mt-0.5 size-4 shrink-0 text-emerald-700"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <AlertTriangle
+                          className="mt-0.5 size-4 shrink-0 text-amber-700"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span>
+                        {photoGeometryReady
+                          ? '已按四角拉正到实测毫米坐标；原照片本身不会写进SVG。四角若选错、皮牌弯曲或有镜头变形，仍须对照叠图复核。'
+                          : '四角、实测毫米尺寸或确认区域尚未锁定，请返回照片复刻重新校准。'}
+                      </span>
+                    </p>
+                    <p className="flex gap-2 text-amber-900">
+                      <AlertTriangle
+                        className="mt-0.5 size-4 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span>
+                        {asset.vector.reconstructedFromConfirmedRegions === true
+                          ? '皮纹、旧缝线和阴影：确认区域外不会进入；确认区域内部无法靠程序完全分辨，必须看红线叠图并在CDR复核。'
+                          : '当前仍是整张照片自动描边，皮纹、旧缝线和阴影可能进入曲线，不能作为制模稿。'}
+                        {asset.vector.reconstructedFromConfirmedRegions ===
+                          true &&
+                          ((asset.vector.manualEraseRegionCount ?? 0) > 0
+                            ? ` 已设置 ${asset.vector.manualEraseRegionCount} 处内部去杂。`
+                            : ' 如内部有杂纹，请回到照片复刻，用“排除这处皮纹”框掉。')}
+                      </span>
+                    </p>
+                    <p className="flex gap-2 text-amber-900">
+                      <AlertTriangle
+                        className="mt-0.5 size-4 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span>字形说明：{photoGlyphDescription}。</span>
+                    </p>
+                    <p className="flex gap-2">
+                      {photoArtifactId &&
+                      reviewedPhotoArtifactId === photoArtifactId ? (
+                        <Check
+                          className="mt-0.5 size-4 shrink-0 text-emerald-700"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <AlertTriangle
+                          className="mt-0.5 size-4 shrink-0 text-amber-700"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <span>
+                        内容人工复核：
+                        {photoArtifactId &&
+                        reviewedPhotoArtifactId === photoArtifactId
+                          ? '本次描绘已确认。'
+                          : '尚未勾选下方逐字、逐线复核。'}
+                      </span>
+                    </p>
+                  </div>
+                </div>
                 {!asset.vector.reconstructedFromConfirmedRegions && (
                   <p>
                     当前是“整张照片自动描边”参考模式，不能作为制模主文件。请回到照片复刻，切换为“按确认内容重建”。
@@ -1523,7 +1680,7 @@ export default function Home() {
                   size="lg"
                   className="w-full"
                   onClick={downloadPhotoRepairDraft}
-                  disabled={!photoRepairDraftReady}
+                  disabled={!photoRepairDraftReady || !photoCurveStructureReady}
                 >
                   <Download aria-hidden="true" />
                   下载CDR描修工作稿（不可直接制模）
@@ -1562,9 +1719,9 @@ export default function Home() {
                 <a
                   className="cdr-helper-link"
                   href="/ArtworkToCDR.vbs"
-                  download="皮牌纯图文制模_CDR助手_v2.vbs"
+                  download="皮牌纯图文制模_CDR助手_v3.vbs"
                 >
-                  下载纯图文专用 CDR 助手 v2
+                  下载纯图文专用 CDR 助手 v3
                 </a>
                 <p className="text-xs leading-5">
                   助手只接受带生产标记的纯黑曲线文件；完整示意图、位图、活字、彩色对象或缝线都会被拒绝。
@@ -1589,21 +1746,21 @@ export default function Home() {
             )}
             {isLabelCoordinateAsset && (
               <p className="text-xs leading-5 text-muted-foreground">
-                请删除以前下载的旧助手。旧版可能按图案外接框改变页面尺寸；v2
-                若不能确认纯稿标记和毫米尺寸，会直接停止，不生成错误CDR。
+                请删除以前下载的旧助手。旧版可能按图案外接框改变页面尺寸；v3
+                会检查纯稿标记、毫米尺寸、活字、位图和非曲线对象，任何一项不合格都会停止。
               </p>
             )}
             <ol className="space-y-2 text-sm leading-6 text-muted-foreground">
               <li>
                 <StepNumber>1</StepNumber>
                 {isLabelCoordinateAsset
-                  ? '下载纯图文稿和v2助手。'
+                  ? '下载纯图文稿和v3助手。'
                   : '下载排版工作稿。'}
               </li>
               <li>
                 <StepNumber>2</StepNumber>
                 {isLabelCoordinateAsset
-                  ? '把带“纯图文制模稿”的SVG拖到v2助手上。'
+                  ? '把带“纯图文制模稿”的SVG拖到v3助手上。'
                   : '在CorelDRAW中打开SVG并逐项检查。'}
               </li>
               <li>

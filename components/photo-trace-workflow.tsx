@@ -204,6 +204,28 @@ function rectanglesOverlap(left: NormalizedRect, right: NormalizedRect) {
   return overlapWidth > 0.0005 && overlapHeight > 0.0005;
 }
 
+type CorrectionOverlapDescriptor = Pick<
+  CorrectionRegion,
+  'kind' | 'textShapeSource'
+>;
+
+function isPhotographedRasterRegion(region: CorrectionOverlapDescriptor) {
+  return (
+    region.kind === 'keep' ||
+    (region.kind === 'text' && region.textShapeSource === 'photo-outline')
+  );
+}
+
+function isAllowedCorrectionOverlap(
+  left: CorrectionOverlapDescriptor,
+  right: CorrectionOverlapDescriptor,
+) {
+  return (
+    (left.kind === 'erase' && isPhotographedRasterRegion(right)) ||
+    (right.kind === 'erase' && isPhotographedRasterRegion(left))
+  );
+}
+
 function confirmedContentBoundsMm(
   corrections: CorrectionRegion[],
   widthMm: number,
@@ -1715,12 +1737,22 @@ export function PhotoTraceWorkflow({
             ) - Math.max(0, selection.y - 0.6 / sizeResult.value.height),
         }
       : selection;
-    const overlappingIndex = corrections.findIndex((correction) =>
-      rectanglesOverlap(rect, correction.rect),
-    );
+    const pendingCorrection: CorrectionOverlapDescriptor = {
+      kind,
+      textShapeSource: kind === 'text' ? correctionTextShapeSource : undefined,
+    };
+    const overlappingIndex = corrections.findIndex((correction) => {
+      if (!rectanglesOverlap(rect, correction.rect)) return false;
+      // An erase region is subtractive and runs after photographed text/graphics
+      // are reconstructed. Allow it to overlap those photo regions so a user can
+      // remove an internal leather grain, old stitch hole or shadow without
+      // deleting the whole confirmed letter/graphic. Font and geometric overlays
+      // are generated later and therefore remain non-overlapping.
+      return !isAllowedCorrectionOverlap(correction, pendingCorrection);
+    });
     if (overlappingIndex >= 0) {
       setError(
-        `当前选区与第${overlappingIndex + 1}处已确认区域重叠。请先撤销旧区域或重新框选，避免同一位置被重复处理。`,
+        `当前选区与第${overlappingIndex + 1}处已确认区域重叠。只有“排除皮纹”可以叠在照片字形或照片图案内部；其他区域请先撤销或重新框选。`,
       );
       return;
     }
@@ -1846,7 +1878,11 @@ export function PhotoTraceWorkflow({
     const hasOverlap = corrections.some((correction, index) =>
       corrections
         .slice(index + 1)
-        .some((next) => rectanglesOverlap(correction.rect, next.rect)),
+        .some(
+          (next) =>
+            rectanglesOverlap(correction.rect, next.rect) &&
+            !isAllowedCorrectionOverlap(correction, next),
+        ),
     );
     if (hasOverlap) {
       setError('已确认区域存在重叠，请先撤销冲突区域再生成。');
@@ -2092,6 +2128,9 @@ export function PhotoTraceWorkflow({
               correction.kind === 'text' &&
               correction.textShapeSource === 'photo-outline'
             ),
+        ).length,
+        manualEraseRegionCount: corrections.filter(
+          (correction) => correction.kind === 'erase',
         ).length,
         reconstructedFromConfirmedRegions: rebuildFromConfirmedRegions,
       });
@@ -2865,6 +2904,7 @@ export function PhotoTraceWorkflow({
               <p className="font-medium">5. 局部去杂纹与逐行原字形复刻</p>
               <p className="text-sm leading-6 text-muted-foreground">
                 在拉正照片上拖出一块区域：每次完整框住一行文字并在四周留少量空白，再输入准确内容。推荐模式只输出这些明确确认的图文。
+                如果字形或图案内部仍有皮纹、旧针孔或阴影，可在该处再框选“排除这处皮纹”，扣除框允许叠在照片轮廓内部。
               </p>
             </div>
             <div className="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,.8fr)]">

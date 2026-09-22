@@ -3,8 +3,8 @@ Option Explicit
 Dim args, fso, svgPath, cdrPath, basePath, stamp, sourceFile, sourceText
 Dim artworkOnly, widthPattern, heightPattern, viewBoxPattern, viewBoxMatch
 Dim expectedWidth, expectedHeight, viewX, viewY, viewWidth, viewHeight
-Dim corel, document, allShapes, textShapes, saveOptions, pageWidth, pageHeight
-Dim shell, publicRoot, stagingFolder, stagedSvgPath, stagedCdrPath, importedShape, usableShapes
+Dim corel, document, allShapes, textShapes, bitmapShapes, curveShapes, saveOptions, pageWidth, pageHeight
+Dim shell, publicRoot, stagingFolder, stagedSvgPath, stagedCdrPath, importedShape, usableShapes, unsupportedShapes, curveObjectCount
 
 Sub Report(message, flags, title)
   If InStr(1, LCase(WScript.FullName), "cscript.exe", vbTextCompare) > 0 Then
@@ -48,7 +48,9 @@ If Not artworkOnly Then
   WScript.Quit 1
 End If
 If InStr(1, sourceText, "data-export-profile=""leather-label-mold-artwork""", vbTextCompare) = 0 Or _
-   InStr(1, sourceText, "data-export-version=""2""", vbTextCompare) = 0 Or _
+   InStr(1, sourceText, "data-export-version=""3""", vbTextCompare) = 0 Or _
+   InStr(1, sourceText, "data-object-model=""paths-only""", vbTextCompare) = 0 Or _
+   InStr(1, sourceText, "data-curve-audit=""passed""", vbTextCompare) = 0 Or _
    InStr(1, sourceText, "data-human-reviewed=""true""", vbTextCompare) = 0 Then
   Report "Rejected: the production export marker is missing or outdated. Download the pure artwork SVG again from the current leather label designer.", 16, "Save as CDR"
   WScript.Quit 1
@@ -57,10 +59,25 @@ If InStr(1, sourceText, "<image", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<text", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<rect", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<line", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<circle", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<ellipse", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<polygon", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<polyline", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<use", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<defs", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<symbol", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<pattern", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<filter", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<mask", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<clippath", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<style", vbTextCompare) > 0 Or _
    InStr(1, sourceText, "<script", vbTextCompare) > 0 Or _
-   InStr(1, sourceText, "<foreignObject", vbTextCompare) > 0 Then
+   InStr(1, sourceText, "<foreignObject", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "<a", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, " href=", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, " xlink:href=", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "=""url(", vbTextCompare) > 0 Or _
+   InStr(1, sourceText, "=""data:image/", vbTextCompare) > 0 Then
   Report "Rejected: mold artwork may contain groups and closed paths only. No CDR was saved.", 16, "Save as CDR"
   WScript.Quit 1
 End If
@@ -165,7 +182,7 @@ On Error GoTo 0
 ' CorelDRAW unit 3 is millimeters. Never fit artwork-only pages to path bounds:
 ' doing so changes the true label size and every artwork margin.
 document.Unit = 3
-Set allShapes = document.ActivePage.Shapes.All
+Set allShapes = document.ActivePage.Shapes.FindShapes("", 0, True)
 usableShapes = 0
 For Each importedShape In allShapes
   If importedShape.SizeWidth > 0.01 Or importedShape.SizeHeight > 0.01 Then
@@ -207,9 +224,18 @@ If artworkOnly Then
   Next
 End If
 
-Set textShapes = document.ActivePage.Shapes.FindShapes("", 6)
+Set textShapes = document.ActivePage.Shapes.FindShapes("", 6, True)
+Set bitmapShapes = document.ActivePage.Shapes.FindShapes("", 5, True)
+Set curveShapes = document.ActivePage.Shapes.FindShapes("", 3, True)
 If artworkOnly And textShapes.Count > 0 Then
   Report "Artwork-only SVG imported live text. No CDR was saved.", 16, "Save as CDR"
+  document.Close
+  SafeQuitCorel
+  fso.DeleteFolder stagingFolder, True
+  WScript.Quit 1
+End If
+If bitmapShapes.Count > 0 Then
+  Report "A bitmap object was found after import. No CDR was saved.", 16, "Save as CDR"
   document.Close
   SafeQuitCorel
   fso.DeleteFolder stagingFolder, True
@@ -223,6 +249,23 @@ If textShapes.Count > 0 Then
   WScript.Quit 1
 End If
 
+unsupportedShapes = 0
+For Each importedShape In allShapes
+  ' cdrCurveShape = 3; cdrGroupShape = 7. Groups are allowed only as
+  ' containers, and FindShapes above recursively checks every child object.
+  If importedShape.Type <> 3 And importedShape.Type <> 7 Then
+    unsupportedShapes = unsupportedShapes + 1
+  End If
+Next
+If curveShapes.Count = 0 Or unsupportedShapes > 0 Then
+  Report "The imported file contains a non-curve drawing object. No CDR was saved.", 16, "Save as CDR"
+  document.Close
+  SafeQuitCorel
+  fso.DeleteFolder stagingFolder, True
+  WScript.Quit 1
+End If
+curveObjectCount = curveShapes.Count
+
 Set saveOptions = corel.CreateStructSaveAsOptions()
 saveOptions.Overwrite = False
 document.SaveAs stagedCdrPath, saveOptions
@@ -233,4 +276,5 @@ fso.DeleteFolder stagingFolder, True
 
 Report "CDR saved: " & vbCrLf & cdrPath & vbCrLf & _
        "Page: " & pageWidth & " x " & pageHeight & " mm" & vbCrLf & _
+       "Curve objects: " & curveObjectCount & "; live text: 0; bitmaps: 0" & vbCrLf & _
        "Verify every letter and artwork margin before making a mold.", 64, "Save complete"
